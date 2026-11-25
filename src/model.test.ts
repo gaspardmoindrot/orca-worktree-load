@@ -1,5 +1,5 @@
 import { assert, test } from 'orca/testing'
-import { attribute, classify, parseCpuTime, parseDockerPs, parseDockerStats, parseLsof, parsePs, parseTop, record, rollUp, sparkline, statusBar, DOCKER_VM, ORCA_APP, OTHER, type Resolver } from './model'
+import { attribute, classify, mcpName, parseCpuTime, parseDockerPs, parseDockerStats, parseLsof, parsePs, parseTop, record, rollUp, sparkline, statusBar, DOCKER_VM, ORCA_APP, OTHER, type Resolver } from './model'
 import { DOCKER_PS, DOCKER_STATS, LSOF, PS, TOP } from './fixtures'
 
 const resolver: Resolver = {
@@ -43,6 +43,9 @@ test('classifies processes', () => {
   assert.equal(classify('node /w/api/node_modules/.bin/vitest run'), 'test')
   assert.equal(classify('-zsh'), 'shell')
   assert.equal(classify('/usr/bin/tsc -b'), 'build')
+  assert.equal(mcpName('node /r/node_modules/.pnpm/@playwright+mcp@0.0.83/node_modules/@playwright/mcp/cli.js'), 'Playwright')
+  assert.equal(mcpName('node scripts/playwright/mcp.mts --headless'), 'Playwright')
+  assert.equal(mcpName('node /x/.bin/mcp-server-github'), 'Github')
 })
 
 test('rolls up memory, CPU and Docker per worktree, without counting containers twice', () => {

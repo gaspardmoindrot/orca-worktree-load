@@ -117,6 +117,26 @@ export function classify(command: string): Kind {
   return 'other'
 }
 
+/** "@playwright/mcp", "scripts/playwright/mcp.mts", "mcp-server-github" → "playwright", "github". */
+export function mcpName(command: string): string {
+  const m =
+    /@([\w.-]+)[/+]mcp\b/.exec(command) ??
+    /mcp-server-([\w.-]+)/.exec(command) ??
+    /([\w.-]+)-mcp(-server)?\b/.exec(command) ??
+    /\/([\w.-]+)\/mcp\.m?[jt]s\b/.exec(command)
+  const name = m ? m[1].replace(/^\.+/, '').replace(/^modelcontextprotocol$/, '') : ''
+  return name ? name[0].toUpperCase() + name.slice(1) : 'MCP'
+}
+
+/** Which coding agent a process is, for "3 Claude · 1 Codex". */
+export function agentTool(command: string): string {
+  const c = command.toLowerCase()
+  for (const [needle, label] of [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini'], ['opencode', 'OpenCode'], ['cursor-agent', 'Cursor'], ['aider', 'Aider'], ['amp', 'Amp']] as const) {
+    if (c.includes(needle)) return label
+  }
+  return 'Agent'
+}
+
 /** A short process name: the binary, or the script for node/python/bun. */
 export function shortName(command: string): string {
   const parts = command.split(/\s+/)
@@ -206,7 +226,13 @@ export type OwnerLoad = {
   cpu: number
   memory: number
   processes: number
-  kinds: Partial<Record<Kind, { cpu: number; memory: number; count: number }>>
+  /** `count` is how many separate things run (a process whose parent is not of the same kind),
+   *  `processes` how many processes they hold: one Playwright MCP server is about 5 processes. */
+  kinds: Partial<Record<Kind, { cpu: number; memory: number; count: number; processes: number }>>
+  /** Agent sessions by tool: { Claude: 3, Codex: 1 }. */
+  agents: Record<string, number>
+  /** MCP servers by name: { playwright: 9, github: 1 }. */
+  mcp: Record<string, number>
   top: ProcLoad[]
   /** The worktree's share of the Docker VM, split by its containers' memory and CPU. */
   docker: { cpu: number; memory: number; containers: { name: string; cpu: number; memory: number }[] }
@@ -236,7 +262,7 @@ export type Snapshot = {
 }
 
 function emptyOwner(key: OwnerKey, name: string): OwnerLoad {
-  return { key, name, repo: null, branch: null, orca: false, gone: false, agentState: null, cpu: 0, memory: 0, processes: 0, kinds: {}, top: [], docker: { cpu: 0, memory: 0, containers: [] } }
+  return { key, name, repo: null, branch: null, orca: false, gone: false, agentState: null, cpu: 0, memory: 0, processes: 0, kinds: {}, agents: {}, mcp: {}, top: [], docker: { cpu: 0, memory: 0, containers: [] } }
 }
 
 /** "~/.worktrees/repo-abc/agent-123" → name "agent-123", repo "repo-abc". */
@@ -274,19 +300,33 @@ export function rollUp(input: {
     return o
   }
 
+  const byPid = new Map(input.procs.map((p) => [p.pid, p]))
+  const kindOf = new Map(input.procs.map((p) => [p.pid, classify(p.command)]))
   for (const p of input.procs) {
-    const o = get(input.owners.get(p.pid) ?? OTHER)
+    const ownerKey = input.owners.get(p.pid) ?? OTHER
+    const o = get(ownerKey)
     const cpu = input.cpu.get(p.pid) ?? 0
     const memory = input.memory.get(p.pid) ?? p.rss
-    const kind = classify(p.command)
+    const kind = kindOf.get(p.pid)!
+    const parent = byPid.get(p.ppid)
+    const root = !parent || kindOf.get(parent.pid) !== kind || (input.owners.get(parent.pid) ?? OTHER) !== ownerKey
     o.cpu += cpu
     o.memory += memory
     o.processes++
-    const k = (o.kinds[kind] ??= { cpu: 0, memory: 0, count: 0 })
+    const k = (o.kinds[kind] ??= { cpu: 0, memory: 0, count: 0, processes: 0 })
     k.cpu += cpu
     k.memory += memory
-    k.count++
+    k.processes++
+    if (root) k.count++
     o.top.push({ pid: p.pid, name: shortName(p.command), kind, cpu, memory })
+    if (root && kind === 'agent') {
+      const tool = agentTool(p.command)
+      o.agents[tool] = (o.agents[tool] ?? 0) + 1
+    }
+    if (root && kind === 'mcp') {
+      const name = mcpName(p.command)
+      o.mcp[name] = (o.mcp[name] ?? 0) + 1
+    }
   }
 
   // Containers live inside Docker's VM, which macOS sees as one process. Each worktree gets a share
@@ -327,7 +367,7 @@ export function rollUp(input: {
   // Every Orca worktree shows up, even idle.
   for (const w of input.orcaWorktrees) get(w.path)
 
-  for (const o of table.values()) o.top = o.top.sort((a, b) => b.memory - a.memory).slice(0, 8)
+  for (const o of table.values()) o.top = o.top.sort((a, b) => b.memory - a.memory).slice(0, 30)
 
   const buckets = new Set([ORCA_APP, DOCKER_VM, OTHER])
   return {
