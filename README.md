@@ -1,33 +1,42 @@
 # Worktree Load
 
-How heavy each Orca worktree is, live: CPU, RAM, agents, terminals, uncommitted diff and disk size.
+What each worktree costs your Mac, live, in Orca: memory and CPU of every process it started (agents, MCP servers, dev servers, tests, builds) plus its share of Docker, with the last hour.
 
-- **Status bar**: `CPU total · RAM total · live/total worktrees · N working`. It turns orange when a worktree goes over a threshold and red at twice the RAM threshold. The tooltip shows the 3 heaviest worktrees. Click it to refresh.
-- **Right-sidebar panel** "Worktree Load": one row per worktree with CPU, a CPU sparkline over the last 30 polls, RAM, agents (working / waiting / idle), terminals, `git diff --shortstat HEAD`, disk size (`du`) and last activity. Sort by any column. Double-click a row to open the worktree.
-- **Notification** when a worktree stays over a threshold for 3 polls in a row, so a short `npm install` doesn't trigger it.
+- **Status bar**: `7.6 GB · 9.2% in 20 worktrees`. Orange or red with macOS memory pressure; the tooltip names the 3 heaviest worktrees. Click to sample now.
+- **Right-sidebar panel**: the Mac, then one row per worktree (memory, CPU, last hour, Docker, processes). Select a row for its load by kind, its heaviest processes and its containers. Double-click opens an Orca worktree.
+- **Docker stacks of deleted worktrees** get their own warning: containers that kept running after their worktree was removed.
+- **One notification per memory pressure episode**, naming the heaviest worktree.
 
-## Where the numbers come from
+## How a process gets its worktree
 
-The plugin host API has no PID, CPU or memory. Orca measures them itself (the process tree of every terminal, plus agent chats), so the worker reads:
+Every `intervalSeconds` (5 s) the worker reads every process with `ps`, and its working directory with `lsof` (only for new PIDs, and a full pass every minute). In order:
 
-| Every | Command | Gives |
-|---|---|---|
-| `intervalSeconds` (10 s) | `orca diagnostics memory --json` | CPU (% of one core) and RAM (macOS footprint) per worktree, host RAM and load |
-| `intervalSeconds` | `orca worktree ps --json` | every worktree, its agents and their state, live terminals, last activity |
-| 1 min | `git diff --shortstat HEAD` in each live worktree | files, +/- lines |
-| `diskMinutes` (10 min) | `du -sk` per worktree, one at a time | disk size, `node_modules` included |
+1. its working directory is inside an Orca worktree, or inside any other git checkout (worktrees made by Claude Code or by hand; turn this off in settings);
+2. it is Docker Desktop or its VM;
+3. otherwise it belongs to its parent: an MCP server or a dev server started by an agent counts for that agent's worktree;
+4. what is left under Orca's app process is "Orca app", the rest "Everything else".
 
-Limits: a process started outside an Orca terminal (an external terminal or a launchd service) is not counted. The CLI JSON is not part of Orca's stable plugin API, so a future Orca release can change it.
+Memory is the footprint Activity Monitor shows (`top`, every 15 s). CPU is the difference between two `ps` readings, in % of one core.
+
+Docker's VM is one process for macOS. Every 30 s the worker reads `docker ps` and `docker stats`, finds each container's worktree from its compose folder (`com.docker.compose.project.working_dir`), and gives that worktree a share of the VM's footprint and CPU in proportion to its containers' memory and CPU. That share leaves the Docker row, so nothing is counted twice.
+
+Nothing is written to disk. History is the last hour in memory, in 30-second buckets, and starts again with Orca.
+
+## Limits
+
+- macOS only (`ps`, `lsof`, `top`, `sysctl`).
+- It samples while Orca runs. A process that lives less than one interval can be missed.
+- Processes of other users (root) cannot be read with `lsof`; they inherit their parent's owner or land in "Everything else".
 
 ## Settings
 
-Poll interval, CPU threshold (% of one core, default 150), RAM threshold (MB, default 4096), notifications on/off, disk scan interval (0 = off).
+Sample interval, Docker interval (0 turns Docker off), count git checkouts Orca does not manage, notify on memory pressure.
 
 ## Develop
 
 ```sh
 orca plugin validate .
-orca plugin test .      # src/load.test.ts, src/worker.test.ts (the CLI is mocked)
-orca plugin check .     # renders the panel with the real worker
+orca plugin test .      # src/model.test.ts, src/worker.test.ts (system commands are mocked)
+orca plugin check .     # renders the panel with the real worker, on this Mac
 orca plugin dev watch . # load it, stream logs, reload on save
 ```

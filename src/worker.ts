@@ -1,37 +1,42 @@
-// The resident worker. It stays up because the manifest declares a status bar item, and polls:
-// - every `intervalSeconds`: `orca diagnostics memory` (CPU and memory per worktree, which Orca
-//   already attributes from each terminal's process tree) and `orca worktree ps` (every worktree,
-//   its agents and terminals). The plugin host API has no PID, CPU or memory, so the CLI it is.
-// - every minute: `git diff --shortstat HEAD` per live worktree.
-// - every `diskMinutes`: `du -sk` per worktree, one at a time (node_modules makes it slow).
+// The resident worker (the status bar item keeps it running). Every `intervalSeconds` it reads
+// every process on the Mac with `ps`, finds where each one runs (`lsof`, only for new PIDs), and
+// gives it to a worktree: an Orca worktree first, else any git checkout, else its parent's owner.
+// Memory is the footprint Activity Monitor shows (`top`, every 15 s); Docker containers are read
+// every 30 s and put under the worktree of their compose folder. Nothing is written to disk:
+// history is the last hour, in memory. macOS only.
 // Orca transpiles this file when it loads: no build step.
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { homedir, loadavg, totalmem, cpus, userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import {
-  crossings,
+  attribute,
   formatBytes,
-  formatCpu,
-  merge,
-  parseShortstat,
+  parseDockerPs,
+  parseDockerStats,
+  parseLsof,
+  parsePs,
+  parseTop,
+  record,
+  rollUp,
   statusBar,
-  type Diagnostics,
-  type DiskInfo,
-  type PsWorktree,
-  type Snapshot,
-  type Thresholds
-} from './load'
+  totalOf,
+  type Container,
+  type History,
+  type Machine,
+  type OrcaWorktree,
+  type PanelPayload,
+  type Resolver,
+  type Snapshot
+} from './model'
 
-const ORCA_BIN = ['/usr/local/bin/orca', '/opt/homebrew/bin/orca', '/Applications/Orca.app/Contents/Resources/bin/orca'].find(existsSync) ?? 'orca'
-const GIT_BIN = ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git'].find(existsSync) ?? 'git'
-const DU_BIN = existsSync('/usr/bin/du') ? '/usr/bin/du' : 'du'
-
-export type Runner = (bin: string, args: string[], opts?: { cwd?: string; timeout?: number }) => Promise<string>
+export type Runner = (bin: string, args: string[], opts?: { timeout?: number; allowFail?: boolean }) => Promise<string>
 
 const execRunner: Runner = (bin, args, opts = {}) =>
   new Promise((resolve, reject) =>
-    execFile(bin, args, { timeout: opts.timeout ?? 15000, cwd: opts.cwd, maxBuffer: 32 * 2 ** 20 }, (error, stdout, stderr) =>
-      error ? reject(new Error(String(stderr || error.message).trim())) : resolve(stdout)
+    execFile(bin, args, { timeout: opts.timeout ?? 15000, maxBuffer: 64 * 2 ** 20 }, (error, stdout, stderr) =>
+      error && !(opts.allowFail && stdout) ? reject(new Error(String(stderr || error.message).trim())) : resolve(stdout)
     )
   )
 
@@ -41,145 +46,241 @@ export function setRunner(r: Runner): void {
   run = r
 }
 
-const EMPTY_HOST = { totalMemory: 0, availableMemory: 0, memoryUsagePercent: 0, cpuCoreCount: 0, loadAverage1m: 0 }
+const find = (names: string[], fallback: string) => names.find(existsSync) ?? fallback
+const PS = '/bin/ps'
+const TOP = '/usr/bin/top'
+const LSOF = '/usr/sbin/lsof'
+const SYSCTL = '/usr/sbin/sysctl'
+const DOCKER = find(['/usr/local/bin/docker', '/opt/homebrew/bin/docker', join(homedir(), '.docker/bin/docker')], '')
 
+const BUCKET_MS = 30_000
+let firstGapMs = 1000
+/** Tests skip the one-second wait between the first two readings. */
+export function setFirstGap(ms: number): void {
+  firstGapMs = ms
+}
+const BUCKETS = 120 // one hour
+
+// --- state (module level, so deactivate can reset it) -------------------------------------------
 let last: Snapshot | null = null
-let history: Record<string, { cpu: number[]; mem: number[] }> = {}
-let streaks: Record<string, number> = {}
-let disk: Record<string, DiskInfo> = {}
-let ticking = false
-let diskRunning = false
-let lastDiff = 0
-let lastDisk = 0
+let history: History = {}
+let prevCpu = new Map<number, { seconds: number; at: number }>()
+let cwds = new Map<number, { cwd: string; command: string }>()
+let footprints = new Map<number, number>()
+let physUsed: number | null = null
+let containers: Container[] = []
+let orcaWorktrees: OrcaWorktree[] = []
+let gitRoots = new Map<string, string | null>()
+let lastTop = 0
+let lastDocker = 0
+let lastOrca = 0
+let lastFullLsof = 0
+let pressureSince: number | null = null
+let normalSince: number | null = null
+let ticking: Promise<Snapshot> | null = null
 let timer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
-
-async function orcaJson<T>(args: string[]): Promise<T> {
-  const parsed = JSON.parse(await run(ORCA_BIN, [...args, '--json']))
-  if (!parsed.ok) throw new Error(parsed.error?.message ?? `orca ${args.join(' ')} failed`)
-  return parsed.result as T
-}
 
 async function setting<T>(orca: OrcaWorkerApi, key: string, fallback: T): Promise<T> {
   const v = await orca.settings.get(key).catch(() => null)
   return typeof v === typeof fallback && v !== null ? (v as T) : fallback
 }
 
-async function thresholds(orca: OrcaWorkerApi): Promise<Thresholds> {
-  return { cpu: await setting(orca, 'cpuThreshold', 150), memoryMb: await setting(orca, 'memoryThresholdMb', 4096) }
-}
-
-async function probeDiffs(paths: string[]): Promise<void> {
-  for (const path of paths) {
-    try {
-      const out = await run(GIT_BIN, ['diff', '--shortstat', 'HEAD'], { cwd: path, timeout: 10000 })
-      disk[path] = { ...disk[path], ...parseShortstat(out) }
-    } catch {
-      // Not a git checkout any more, or no HEAD yet: keep what we had.
+function makeResolver(includeOtherCheckouts: boolean): Resolver {
+  const orcaPaths = orcaWorktrees.map((w) => w.path).sort((a, b) => b.length - a.length)
+  const home = homedir()
+  const gitRoot = (dir: string): string | null => {
+    if (gitRoots.has(dir)) return gitRoots.get(dir) ?? null
+    let root: string | null = null
+    if (dir !== '/' && dir !== home && dir.startsWith('/')) {
+      root = existsSync(join(dir, '.git')) ? dir : gitRoot(dirname(dir))
     }
+    gitRoots.set(dir, root)
+    return root
+  }
+  return {
+    rootFor(dir) {
+      const orca = orcaPaths.find((p) => dir === p || dir.startsWith(`${p}/`))
+      if (orca) return orca
+      return includeOtherCheckouts ? gitRoot(dir) : null
+    },
+    exists: (dir) => existsSync(dir)
   }
 }
 
-async function probeDisk(paths: string[]): Promise<void> {
-  diskRunning = true
-  try {
-    for (const path of paths) {
-      if (stopped) return
-      try {
-        const out = await run(DU_BIN, ['-sk', path], { timeout: 120000 })
-        disk[path] = { ...disk[path], diskBytes: Number(out.split(/\s/)[0]) * 1024 }
-      } catch {
-        // du can time out on a huge tree; the next round tries again.
-      }
+async function refreshCwds(procs: ReturnType<typeof parsePs>, now: number): Promise<void> {
+  const full = now - lastFullLsof > 60_000
+  const missing = procs.filter((p) => cwds.get(p.pid)?.command !== p.command).map((p) => p.pid)
+  const fresh = new Map<number, string>()
+  if (full) {
+    lastFullLsof = now
+    const out = await run(LSOF, ['-a', '-u', userInfo().username, '-d', 'cwd', '-Fn', '-w'], { allowFail: true, timeout: 10000 }).catch(() => '')
+    for (const [pid, cwd] of parseLsof(out)) fresh.set(pid, cwd)
+  } else {
+    for (let i = 0; i < missing.length; i += 200) {
+      const out = await run(LSOF, ['-a', '-d', 'cwd', '-Fn', '-w', '-p', missing.slice(i, i + 200).join(',')], { allowFail: true, timeout: 10000 }).catch(() => '')
+      for (const [pid, cwd] of parseLsof(out)) fresh.set(pid, cwd)
     }
-  } finally {
-    diskRunning = false
+  }
+  const alive = new Set(procs.map((p) => p.pid))
+  for (const p of procs) {
+    const cwd = fresh.get(p.pid)
+    // A process we cannot read (root, another user) keeps an empty cwd and inherits its owner.
+    if (cwd !== undefined || full || missing.includes(p.pid)) cwds.set(p.pid, { cwd: cwd ?? '', command: p.command })
+  }
+  for (const pid of cwds.keys()) if (!alive.has(pid)) cwds.delete(pid)
+}
+
+async function refreshTop(now: number): Promise<void> {
+  if (now - lastTop < 15_000) return
+  lastTop = now
+  const out = await run(TOP, ['-l', '1', '-stats', 'pid,mem', '-n', '5000'], { timeout: 10000 }).catch(() => '')
+  if (!out) return
+  const parsed = parseTop(out)
+  footprints = parsed.footprints
+  physUsed = parsed.physUsed
+}
+
+async function refreshDocker(orca: OrcaWorkerApi, now: number): Promise<void> {
+  const every = (await setting(orca, 'dockerSeconds', 30)) * 1000
+  if (!DOCKER || every <= 0 || now - lastDocker < every) return
+  lastDocker = now
+  try {
+    const ps = parseDockerPs(
+      await run(DOCKER, ['ps', '--format', '{{.ID}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.project"}}\t{{.Names}}'], { timeout: 10000 })
+    )
+    const stats = ps.length ? parseDockerStats(await run(DOCKER, ['stats', '--no-stream', '--format', '{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}'], { timeout: 20000 })) : new Map()
+    containers = ps.map((c) => ({ ...c, cpu: stats.get(c.id)?.cpu ?? 0, memory: stats.get(c.id)?.memory ?? 0 }))
+  } catch {
+    // Docker not running: no containers, not an error.
+    containers = []
   }
 }
 
-async function tick(orca: OrcaWorkerApi): Promise<Snapshot> {
-  if (ticking && last) return last
-  ticking = true
+async function refreshOrca(orca: OrcaWorkerApi, now: number): Promise<void> {
+  if (now - lastOrca < 15_000 && orcaWorktrees.length) return
+  lastOrca = now
   try {
-    const [diag, ps] = await Promise.all([
-      orcaJson<Diagnostics>(['diagnostics', 'memory']),
-      orcaJson<{ worktrees: PsWorktree[] }>(['worktree', 'ps', '--limit', '500'])
-    ])
-    const worktrees = merge(diag, ps.worktrees, disk, history)
-    history = Object.fromEntries(worktrees.map((w) => [w.id, { cpu: w.cpuHistory, mem: w.memHistory }]))
-    last = { at: diag.collectedAt ?? Date.now(), host: diag.host, totalCpu: diag.totalCpu, totalMemory: diag.totalMemory, worktrees }
+    const { workspaces } = await orca.host.call('workspace.list', { includeStatus: true })
+    orcaWorktrees = workspaces
+      .filter((w) => w.kind === 'worktree' && w.path)
+      .map((w) => ({ id: w.id, name: w.name, project: w.project ?? null, path: w.path, branch: w.branch, state: w.status?.state ?? null }))
+    gitRoots = new Map()
+  } catch (error) {
+    orca.log(`workspace.list failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
 
-    const now = Date.now()
-    if (now - lastDiff > 60_000) {
-      lastDiff = now
-      void probeDiffs(worktrees.filter((w) => w.processes > 0 || w.terminals > 0).map((w) => w.path))
-    }
-    const diskEvery = (await setting(orca, 'diskMinutes', 10)) * 60_000
-    if (diskEvery > 0 && !diskRunning && now - lastDisk > diskEvery) {
-      lastDisk = now
-      void probeDisk(worktrees.map((w) => w.path))
-    }
+async function readMachine(cpuSum: number): Promise<Machine> {
+  const level = Number((await run(SYSCTL, ['-n', 'kern.memorystatus_vm_pressure_level']).catch(() => '1')).trim())
+  return {
+    memoryTotal: totalmem(),
+    memoryUsed: physUsed,
+    pressure: level >= 4 ? 'critical' : level >= 2 ? 'warning' : 'normal',
+    cores: cpus().length,
+    load1: loadavg()[0],
+    cpu: cpuSum
+  }
+}
 
-    const c = crossings(worktrees, await thresholds(orca), streaks, 3)
-    streaks = c.streaks
-    if (c.alert.length > 0 && (await setting(orca, 'notify', true))) {
-      for (const w of c.alert) {
-        await orca.host
-          .call('notifications.show', {
-            title: `${w.name} is heavy`,
-            body: `${formatCpu(w.cpu)} CPU · ${formatBytes(w.memory)} for 3 samples in a row (${w.processes} processes)`
-          })
-          .catch(() => undefined)
-      }
+async function alertOnPressure(orca: OrcaWorkerApi, s: Snapshot, now: number): Promise<void> {
+  // One notification per episode of high pressure; an episode ends after a minute back to normal.
+  if (s.machine.pressure === 'normal') {
+    normalSince ??= now
+    if (now - normalSince > 60_000) pressureSince = null
+    return
+  }
+  normalSince = null
+  if (pressureSince !== null) return
+  pressureSince = now
+  if (!(await setting(orca, 'notify', true))) return
+  const heaviest = [...s.worktrees].sort((a, b) => totalOf(b).memory - totalOf(a).memory)[0]
+  await orca.host
+    .call('notifications.show', {
+      title: `Memory pressure ${s.machine.pressure}`,
+      body: heaviest ? `Heaviest worktree: ${heaviest.name} (${formatBytes(totalOf(heaviest).memory)})` : 'No worktree is running anything.'
+    })
+    .catch(() => undefined)
+}
+
+async function sample(orca: OrcaWorkerApi): Promise<Snapshot> {
+  const now = Date.now()
+  try {
+    await refreshOrca(orca, now)
+    let procs = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
+    if (prevCpu.size === 0) {
+      // CPU is a difference between two readings: take a second one a second later.
+      for (const p of procs) prevCpu.set(p.pid, { seconds: p.cpuSeconds, at: Date.now() })
+      await new Promise((r) => setTimeout(r, firstGapMs))
+      procs = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
     }
+    await Promise.all([refreshCwds(procs, now), refreshTop(now), refreshDocker(orca, now)])
+
+    const readAt = Date.now()
+    const cpu = new Map<number, number>()
+    const nextCpu = new Map<number, { seconds: number; at: number }>()
+    for (const p of procs) {
+      const prev = prevCpu.get(p.pid)
+      if (prev && readAt > prev.at) cpu.set(p.pid, Math.max(0, ((p.cpuSeconds - prev.seconds) / ((readAt - prev.at) / 1000)) * 100))
+      else if (last) cpu.set(p.pid, Math.min(100 * cpus().length, (p.cpuSeconds / Math.max(1, (readAt - last.at) / 1000)) * 100))
+      nextCpu.set(p.pid, { seconds: p.cpuSeconds, at: readAt })
+    }
+    prevCpu = nextCpu
+
+    const resolver = makeResolver(await setting(orca, 'includeOtherCheckouts', true))
+    const owners = attribute(procs, new Map([...cwds].map(([pid, v]) => [pid, v.cwd])), resolver, homedir())
+    const cpuSum = [...cpu.values()].reduce((a, b) => a + b, 0)
+    last = rollUp({ procs, owners, cpu, memory: footprints, orcaWorktrees, containers, resolver, machine: await readMachine(cpuSum), at: now })
+    history = record(history, last, BUCKET_MS, BUCKETS)
+    await alertOnPressure(orca, last, now)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    orca.log(`poll failed: ${message}`)
-    last = { ...(last ?? { at: Date.now(), host: EMPTY_HOST, totalCpu: 0, totalMemory: 0, worktrees: [] }), error: message }
-  } finally {
-    ticking = false
+    orca.log(`sample failed: ${message}`)
+    last = last ? { ...last, error: message } : null
+    if (!last) throw error
   }
-  const bar = statusBar(last, await thresholds(orca))
-  await orca.host.call('statusBar.update', { id: 'worktree-load', ...bar }).catch(() => undefined)
-  orca.panels.post('load.snapshot', last)
   return last
 }
 
+
+function payload(s: Snapshot): PanelPayload {
+  const trends: PanelPayload['trends'] = {}
+  for (const [key, points] of Object.entries(history)) {
+    trends[key] = { memoryMb: points.map((p) => Math.round(p.memory / 2 ** 20)), cpu: points.map((p) => Math.round(p.cpu)) }
+  }
+  return { ...s, trends }
+}
+
+async function tick(orca: OrcaWorkerApi): Promise<Snapshot> {
+  ticking ??= sample(orca).finally(() => {
+    ticking = null
+  })
+  const s = await ticking
+  await orca.host.call('statusBar.update', { id: 'worktree-load', ...statusBar(s) }).catch(() => undefined)
+  orca.panels.post('load.snapshot', payload(s))
+  return s
+}
+
 async function loop(orca: OrcaWorkerApi): Promise<void> {
-  await tick(orca)
-  const seconds = Math.min(300, Math.max(3, await setting(orca, 'intervalSeconds', 10)))
+  await tick(orca).catch(() => undefined)
+  const seconds = Math.min(300, Math.max(2, await setting(orca, 'intervalSeconds', 5)))
   if (stopped) return
   timer = setTimeout(() => void loop(orca), seconds * 1000)
   // The IPC channel keeps the worker alive; the timer alone should not (tests exit cleanly).
-  timer.unref?.()
+  ;(timer as { unref?: () => void }).unref?.()
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
   stopped = false
-  orca.panels.handle('load.get', async () => last ?? (await tick(orca)))
-  orca.panels.handle('load.refresh', async () => tick(orca))
+  orca.panels.handle('load.get', async () => payload(last ?? (await tick(orca))))
+  orca.panels.handle('load.refresh', async () => payload(await tick(orca)))
   orca.panels.handle('load.open', async ({ path }) => {
-    // workspace.open wants Orca's workspace id, which is not always the CLI's worktreeId.
-    const { workspaces } = await orca.host.call('workspace.list')
-    const target = workspaces.find((w) => w.path === path)
+    const target = orcaWorktrees.find((w) => w.path === path)
     if (!target) return { opened: false }
     await orca.host.call('workspace.open', { workspaceId: target.id })
     return { opened: true }
   })
-  orca.panels.handle('load.scanDisk', async () => {
-    if (!diskRunning && last) {
-      lastDisk = Date.now()
-      void probeDisk(last.worktrees.map((w) => w.path))
-    }
-    return { started: !diskRunning }
-  })
-
-  orca.commands.register('worktreeLoad.refresh', async () => {
-    const s = await tick(orca)
-    const top = [...s.worktrees].sort((a, b) => b.memory - a.memory)[0]
-    return top ? `Heaviest: ${top.name} (${formatCpu(top.cpu)} · ${formatBytes(top.memory)})` : 'No live worktree.'
-  })
-
+  orca.commands.register('worktreeLoad.refresh', async () => statusBar(await tick(orca)).tooltip)
   void loop(orca)
 }
 
@@ -188,6 +289,15 @@ export function deactivate(): void {
   clearTimeout(timer)
   last = null
   history = {}
-  streaks = {}
-  disk = {}
+  prevCpu = new Map()
+  cwds = new Map()
+  footprints = new Map()
+  physUsed = null
+  containers = []
+  orcaWorktrees = []
+  gitRoots = new Map()
+  lastTop = lastDocker = lastOrca = lastFullLsof = 0
+  pressureSince = normalSince = null
+  firstGapMs = 1000
+  ticking = null
 }

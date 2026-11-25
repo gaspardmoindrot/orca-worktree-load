@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "orca-worktree-load",
   "name": "Worktree Load",
-  "version": "0.1.0",
-  "description": "CPU, RAM, agents, git diff and disk size of every worktree Orca created, in the status bar and a sidebar panel. Notifies when one stays heavy.",
+  "version": "0.2.0",
+  "description": "What each worktree costs your Mac: CPU and memory of every process it started (agents, MCP servers, dev servers, tests) and of its Docker containers, with the last hour. macOS.",
   "engines": {
     "orca": ">=1.4.260"
   },
@@ -23,7 +23,7 @@
     "commands": [
       {
         "id": "worktreeLoad.refresh",
-        "title": "Worktree Load: refresh and show the heaviest worktree",
+        "title": "Worktree Load: sample now",
         "when": "global"
       }
     ],
@@ -33,53 +33,42 @@
         "text": "Load\u2026",
         "icon": "gauge",
         "tone": "neutral",
-        "tooltip": "Worktree load",
+        "tooltip": "What each worktree costs",
         "command": "worktreeLoad.refresh"
       }
     ],
     "settings": [
       {
         "key": "intervalSeconds",
-        "title": "Poll every (seconds)",
-        "description": "How often to read CPU and RAM per worktree.",
+        "title": "Sample every (seconds)",
+        "description": "How often to read every process.",
         "type": "integer",
-        "default": 10,
-        "minimum": 3,
+        "default": 5,
+        "minimum": 2,
         "maximum": 300
       },
       {
-        "key": "cpuThreshold",
-        "title": "Heavy CPU (% of one core)",
-        "description": "A worktree above this is flagged.",
+        "key": "dockerSeconds",
+        "title": "Read Docker every (seconds)",
+        "description": "docker stats takes about 1.5 s. 0 turns Docker off.",
         "type": "integer",
-        "default": 150,
-        "minimum": 10,
-        "maximum": 5000
+        "default": 30,
+        "minimum": 0,
+        "maximum": 600
       },
       {
-        "key": "memoryThresholdMb",
-        "title": "Heavy RAM (MB)",
-        "description": "A worktree above this is flagged; twice this turns the status bar red.",
-        "type": "integer",
-        "default": 4096,
-        "minimum": 100,
-        "maximum": 262144
-      },
-      {
-        "key": "notify",
-        "title": "Notify when a worktree stays heavy",
-        "description": "After 3 polls in a row over a threshold.",
+        "key": "includeOtherCheckouts",
+        "title": "Count git checkouts Orca does not manage",
+        "description": "Worktrees made by Claude Code, other tools or by hand, found by their .git.",
         "type": "boolean",
         "default": true
       },
       {
-        "key": "diskMinutes",
-        "title": "Disk scan every (minutes)",
-        "description": "Runs du on every worktree. 0 turns it off.",
-        "type": "integer",
-        "default": 10,
-        "minimum": 0,
-        "maximum": 1440
+        "key": "notify",
+        "title": "Notify on memory pressure",
+        "description": "One notification per episode, naming the heaviest worktree.",
+        "type": "boolean",
+        "default": true
       }
     ]
   },
