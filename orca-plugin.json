@@ -1,16 +1,36 @@
 {
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
   "manifestVersion": 2,
   "id": "worktree-load",
   "name": "Worktree Load",
   "version": "0.5.0",
-  "description": "See what each worktree costs your Mac: memory and CPU of its agents, MCP servers, dev servers and Docker containers, and stop any of them in one click. macOS.",
+  "description": "What each worktree costs your Mac: memory and CPU of its agents, MCP servers, dev servers and Docker containers, in Orca's right sidebar, with a Stop button per worktree. Local, no network. macOS.",
   "author": {
     "name": "gaspardmoindrot",
     "url": "https://github.com/gaspardmoindrot"
   },
   "repository": "https://github.com/gaspardmoindrot/orca-worktree-load",
+  "homepage": "https://orca.dev/plugins/gaspardmoindrot/orca-worktree-load",
   "license": "MIT",
   "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "The panel: the Mac's memory by worktrees, Docker and Orca, two Docker stacks left running, and sample worktrees with their memory."
+  },
+  "screenshots": [
+    {
+      "path": "assets/screenshot-dark.png",
+      "alt": "Two dark panels with sample data: worktrees heaviest first, and one opened to show its MCP servers, Claude sessions and Docker.",
+      "caption": "Every worktree, heaviest first, and where its memory goes",
+      "theme": "dark"
+    },
+    {
+      "path": "assets/screenshot-light.png",
+      "alt": "The same two panels in the light theme.",
+      "caption": "Follows Orca's light theme",
+      "theme": "light"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.260"
   },

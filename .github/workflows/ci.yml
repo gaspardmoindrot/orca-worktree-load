@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # The Orca release whose CLI validates, tests and writes the typings. Bump both lines together:
+  # the hash is the .deb's sha512 from that release's latest-linux.yml.
+  ORCA_VERSION: "1.4.272"
+  ORCA_DEB_SHA512: "aByMj/Lf8B4IWR0rzpNG57yJ3WthM6kUqkdC14pXo0mmxYL81QT333I5fzXQUa2xZKjUFqnvzCVlr0v8TcvQWA=="
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Cache the Orca package
+        id: orca-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/orca-deb
+          key: orca-deb-${{ env.ORCA_VERSION }}-linux-x64
+      - name: Download Orca
+        if: steps.orca-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/orca-deb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/orca-deb/orca.deb" \
+            "https://github.com/stablyai/orca/releases/download/v${ORCA_VERSION}/orca-ide_${ORCA_VERSION}_amd64.deb"
+      # Only the CLI is used: nothing is installed or started. It runs in Electron's Node mode.
+      - name: Put the Orca CLI on PATH
+        run: |
+          deb="$RUNNER_TEMP/orca-deb/orca.deb"
+          actual="$(openssl dgst -sha512 -binary "$deb" | base64 -w0)"
+          if [ "$actual" != "$ORCA_DEB_SHA512" ]; then
+            echo "::error::orca-ide_${ORCA_VERSION}_amd64.deb does not match ORCA_DEB_SHA512."
+            exit 1
+          fi
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/orca"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/orca/opt/Orca/resources/bin/orca-ide" "$RUNNER_TEMP/bin/orca"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: orca --version
+
+      - run: npm install --no-audit --no-fund
+      - run: orca plugin types .
+      - run: npm run typecheck
+      - run: npm run validate
+      - run: npm test

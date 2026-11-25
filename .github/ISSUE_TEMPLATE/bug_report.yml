@@ -1,0 +1,28 @@
+name: Bug report
+description: Something is wrong or missing in the panel
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: input
+    id: orca
+    attributes:
+      label: Orca version
+      placeholder: "1.4.272"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: "macOS 26.1, M3 Pro"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Plugin logs
+      description: Output of `orca plugin logs <owner>.worktree-load`. Remove anything you do not want to share.
+      render: text

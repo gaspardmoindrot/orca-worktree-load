@@ -1,0 +1,430 @@
+{
+ "at": 0,
+ "machine": {
+  "memoryTotal": 34359738368,
+  "memoryUsed": 22978075033,
+  "pressure": "normal",
+  "cores": 12
+ },
+ "worktrees": [
+  {
+   "key": "/w/shop/checkout-redesign",
+   "name": "checkout-redesign",
+   "repo": "shop",
+   "branch": "feat/checkout-redesign",
+   "orca": true,
+   "gone": false,
+   "cpu": 160,
+   "memory": 1914699776,
+   "processes": 25,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 639631360,
+     "count": 2,
+     "processes": 2
+    },
+    "mcp": {
+     "cpu": 0,
+     "memory": 817889280,
+     "count": 4,
+     "processes": 18
+    },
+    "dev-server": {
+     "cpu": 0,
+     "memory": 440401920,
+     "count": 1,
+     "processes": 3
+    },
+    "shell": {
+     "cpu": 0,
+     "memory": 16777216,
+     "count": 2,
+     "processes": 2
+    }
+   },
+   "agents": {
+    "Claude": 2
+   },
+   "mcp": {
+    "Playwright": 4
+   },
+   "docker": {
+    "cpu": 4,
+    "memory": 566231040,
+    "containers": [
+     {
+      "name": "checkout-redesign-postgres-1",
+      "cpu": 0.5,
+      "memory": 283115520.0
+     },
+     {
+      "name": "checkout-redesign-redis-1",
+      "cpu": 0.5,
+      "memory": 283115520.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "/w/shop/fix-payment-retry",
+   "name": "fix-payment-retry",
+   "repo": "shop",
+   "branch": "fix/payment-retry",
+   "orca": true,
+   "gone": false,
+   "cpu": 420,
+   "memory": 983564288,
+   "processes": 8,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 251658240,
+     "count": 1,
+     "processes": 1
+    },
+    "test": {
+     "cpu": 0,
+     "memory": 723517440,
+     "count": 1,
+     "processes": 6
+    },
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {
+    "Codex": 1
+   },
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "/w/api/rate-limits",
+   "name": "rate-limits",
+   "repo": "api",
+   "branch": "feat/rate-limits",
+   "orca": true,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 406847488,
+   "processes": 4,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 325058560,
+     "count": 1,
+     "processes": 1
+    },
+    "mcp": {
+     "cpu": 0,
+     "memory": 73400320,
+     "count": 1,
+     "processes": 2
+    },
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {
+    "Claude": 1
+   },
+   "mcp": {
+    "Github": 1
+   },
+   "docker": {
+    "cpu": 2,
+    "memory": 398458880,
+    "containers": [
+     {
+      "name": "rate-limits-postgres-1",
+      "cpu": 0.5,
+      "memory": 398458880.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "/w/docs/search-page",
+   "name": "search-page",
+   "repo": "docs",
+   "branch": "feat/search-page",
+   "orca": true,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 668991488,
+   "processes": 6,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 293601280,
+     "count": 1,
+     "processes": 1
+    },
+    "dev-server": {
+     "cpu": 0,
+     "memory": 367001600,
+     "count": 1,
+     "processes": 4
+    },
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {
+    "Claude": 1
+   },
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "/w/api/upgrade-node",
+   "name": "upgrade-node",
+   "repo": "api",
+   "branch": "chore/upgrade-node",
+   "orca": true,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 281018368,
+   "processes": 2,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 272629760,
+     "count": 1,
+     "processes": 1
+    },
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {
+    "Claude": 1
+   },
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "/w/shop/onboarding-copy",
+   "name": "onboarding-copy",
+   "repo": "shop",
+   "branch": "onboarding-copy",
+   "orca": true,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 8388608,
+   "processes": 1,
+   "kinds": {
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {},
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "/w/api/old-flags",
+   "name": "old-flags",
+   "repo": "api",
+   "branch": "old-flags",
+   "orca": true,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 8388608,
+   "processes": 1,
+   "kinds": {
+    "shell": {
+     "cpu": 0,
+     "memory": 8388608,
+     "count": 1,
+     "processes": 1
+    }
+   },
+   "agents": {},
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "/Users/me/.worktrees/api/agent-7f3a",
+   "name": "agent-7f3a",
+   "repo": "api",
+   "branch": null,
+   "orca": false,
+   "gone": false,
+   "cpu": 0.0,
+   "memory": 545259520,
+   "processes": 6,
+   "kinds": {
+    "agent": {
+     "cpu": 0,
+     "memory": 199229440,
+     "count": 1,
+     "processes": 1
+    },
+    "build": {
+     "cpu": 0,
+     "memory": 346030080,
+     "count": 1,
+     "processes": 5
+    }
+   },
+   "agents": {
+    "Claude": 1
+   },
+   "mcp": {},
+   "docker": {
+    "cpu": 0,
+    "memory": 0,
+    "containers": []
+   }
+  },
+  {
+   "key": "docker:shop-agent-2c91",
+   "name": "shop-agent-2c91",
+   "repo": null,
+   "branch": null,
+   "orca": false,
+   "gone": true,
+   "cpu": 0.0,
+   "memory": 0,
+   "processes": 0,
+   "kinds": {},
+   "agents": {},
+   "mcp": {},
+   "docker": {
+    "cpu": 1,
+    "memory": 325058560,
+    "containers": [
+     {
+      "name": "shop-agent-2c91-postgres-1",
+      "cpu": 0.5,
+      "memory": 162529280.0
+     },
+     {
+      "name": "shop-agent-2c91-redis-1",
+      "cpu": 0.5,
+      "memory": 162529280.0
+     }
+    ]
+   }
+  },
+  {
+   "key": "docker:api-agent-81be",
+   "name": "api-agent-81be",
+   "repo": null,
+   "branch": null,
+   "orca": false,
+   "gone": true,
+   "cpu": 0.0,
+   "memory": 0,
+   "processes": 0,
+   "kinds": {},
+   "agents": {},
+   "mcp": {},
+   "docker": {
+    "cpu": 1,
+    "memory": 272629760,
+    "containers": [
+     {
+      "name": "api-agent-81be-postgres-1",
+      "cpu": 0.5,
+      "memory": 272629760.0
+     }
+    ]
+   }
+  }
+ ],
+ "orcaApp": {
+  "key": "@orca",
+  "name": "@orca",
+  "repo": null,
+  "branch": null,
+  "orca": false,
+  "gone": false,
+  "cpu": 40,
+  "memory": 1717986918,
+  "processes": 10,
+  "kinds": {},
+  "agents": {},
+  "mcp": {},
+  "docker": {
+   "cpu": 0,
+   "memory": 0,
+   "containers": []
+  }
+ },
+ "dockerVm": {
+  "key": "@docker",
+  "name": "@docker",
+  "repo": null,
+  "branch": null,
+  "orca": false,
+  "gone": false,
+  "cpu": 0,
+  "memory": 966367641,
+  "processes": 10,
+  "kinds": {},
+  "agents": {},
+  "mcp": {},
+  "docker": {
+   "cpu": 0,
+   "memory": 0,
+   "containers": []
+  }
+ },
+ "other": {
+  "key": "@other",
+  "name": "@other",
+  "repo": null,
+  "branch": null,
+  "orca": false,
+  "gone": false,
+  "cpu": 0,
+  "memory": 9663676416,
+  "processes": 10,
+  "kinds": {},
+  "agents": {},
+  "mcp": {},
+  "docker": {
+   "cpu": 0,
+   "memory": 0,
+   "containers": []
+  }
+ }
+}

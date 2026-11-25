@@ -1,0 +1,18 @@
+{
+  "name": "orca-worktree-load",
+  "private": true,
+  "description": "Development tools only: Orca loads src/ as is, with no build step.",
+  "type": "module",
+  "scripts": {
+    "validate": "orca plugin validate .",
+    "test": "orca plugin test .",
+    "typecheck": "tsc -p . --noEmit",
+    "shoot": "node tools/shoot.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "esbuild": "0.25.10",
+    "playwright-core": "1.56.1",
+    "typescript": "5.6.3"
+  }
+}
