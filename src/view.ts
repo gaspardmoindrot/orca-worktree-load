@@ -207,6 +207,13 @@ export function stopText(rows: readonly Row[]): string {
   return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
 }
 
+/** A plain "Stop" button; it stops on click, and says "Stopping…" until the worker is done. */
+function stopButton(attr: string, id: string, ui: UiState, label = 'Stop', title = label): string {
+  const busy = ui.busy === id
+  const inner = busy ? `<span class="spin" aria-label="Stopping"></span>` : esc(label)
+  return `<button class="btn stop${busy ? ' busy' : ''}" ${attr} title="${esc(busy ? 'Stopping…' : title)}" ${ui.busy ? 'disabled' : ''}>${inner}</button>`
+}
+
 function confirmStrip(id: string, ui: UiState): string {
   if (ui.confirm?.id !== id) return ''
   const busy = ui.busy === id
@@ -246,9 +253,8 @@ function row(r: Row, max: number, ui: UiState): string {
         <span class="summary">${esc(r.summary)}${r.cpu ? ` · <span class="num">${r.cpu}</span>` : ''}</span>
         <span class="bar"><i style="width:${pct(r.bytes, max)}"></i></span>
       </button>
-      <span class="actions"><button class="ibtn danger" data-stop="${esc(r.key)}" title="Stop ${esc(r.name)}" aria-label="Stop ${esc(r.name)}">${icon('stop')}</button></span>
+      <span class="actions${ui.busy === id ? ' busy' : ''}">${stopButton(`data-stop="${esc(r.key)}"`, id, ui, 'Stop', `Stop what ${r.name} runs`)}</span>
     </div>
-    ${confirmStrip(id, ui)}
     ${open ? detail(r) : ''}
   </div>`
 }
@@ -260,9 +266,8 @@ function section(id: string, title: string, rows: Row[], max: number, ui: UiStat
     <div class="sec-head">
       <span class="sec-title">${esc(title)}</span>
       <span class="sec-val num">${rows.length ? bytes(sum) : ''}</span>
-      <span class="sec-act">${rows.length > 1 ? `<button class="ibtn danger" data-stop-section="${id}" title="Stop all ${esc(title.toLowerCase())}" aria-label="Stop all ${esc(title.toLowerCase())}">${icon('stop')}</button>` : ''}</span>
+      <span class="sec-act">${rows.length > 1 ? stopButton(`data-stop-section="${id}"`, `section:${id}`, ui, 'Stop all', `Stop all ${title.toLowerCase()}`) : ''}</span>
     </div>
-    ${confirmStrip(`section:${id}`, ui)}
     ${rows.map((r) => row(r, max, ui)).join('')}
     ${extra}
   </section>`
@@ -279,10 +284,9 @@ export function render(v: View, ui: UiState): string {
         <div class="banner-head">
           <span class="warn-dot"></span>
           <button class="banner-title" data-show-gone aria-expanded="${ui.showGone}">${plural(v.gone.length, 'Docker stack')} left running · <span class="num">${bytes(goneBytes)}</span></button>
-          <button class="btn quiet" data-stop-section="gone">Stop all</button>
+          ${stopButton('data-stop-section="gone"', 'section:gone', ui, 'Stop all', 'docker compose down each stack')}
         </div>
         <div class="banner-sub">Their worktrees were deleted.</div>
-        ${confirmStrip('section:gone', ui)}
         ${ui.showGone ? `<div class="gone-list">${v.gone.map((r) => `<div class="gone"><span class="name">${esc(r.name)}</span><span class="num">${bytes(r.bytes)}</span></div>`).join('')}</div>` : ''}
       </div>`
     : ''
@@ -356,7 +360,7 @@ header{padding:12px 12px 12px;border-bottom:1px solid var(--line)}
 .gone .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 section{padding:0 4px}
-.sec-head{display:grid;grid-template-columns:minmax(0,1fr) auto 22px;align-items:center;column-gap:6px;height:28px;margin-top:10px;padding:0 6px 0 8px}
+.sec-head{display:grid;grid-template-columns:minmax(0,1fr) auto 52px;align-items:center;column-gap:6px;height:28px;margin-top:10px;padding:0 6px 0 8px}
 .sec-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .sec-val{font-size:11px;color:var(--muted);text-align:right;padding-right:2px}
 .sec-act{display:flex;justify-content:flex-end}
@@ -378,7 +382,7 @@ section{padding:0 4px}
 .row.open{background:color-mix(in srgb,var(--accent) 22%,transparent)}
 .head{position:relative;border-radius:6px;transition:background-color .15s}
 .head:hover{background:var(--hover)}
-.toggle{display:grid;width:100%;grid-template-columns:12px minmax(0,1fr) auto 22px;column-gap:6px;padding:6px 8px 7px 6px}
+.toggle{display:grid;width:100%;grid-template-columns:12px minmax(0,1fr) auto 52px;column-gap:6px;padding:6px 8px 7px 6px}
 .chev{grid-row:1;display:flex;align-items:center;color:var(--muted);transition:transform .15s}
 .chev svg{width:11px;height:11px}
 .open .chev{transform:rotate(90deg)}
@@ -388,6 +392,13 @@ section{padding:0 4px}
 .bar{grid-column:2/4;height:2px;margin-top:5px;border-radius:999px;background:var(--track);overflow:hidden}
 .bar i{display:block;height:100%;min-width:2px;border-radius:999px;background:var(--fill);transition:width .4s}
 .actions{position:absolute;right:6px;top:4px;opacity:0;transition:opacity .15s}
+.actions.busy{opacity:1}
+.btn.stop{color:var(--muted)}
+.btn.stop:hover{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}
+.btn.stop:disabled{opacity:1}
+.btn.stop.busy{min-width:34px;justify-content:center}
+.spin{width:11px;height:11px;border:1.5px solid color-mix(in srgb,var(--muted) 35%,transparent);border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .head:hover .actions,.head:focus-within .actions,.open .actions{opacity:1}
 
 .confirm{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin:2px 8px 6px 24px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:11px;background:var(--bg)}

@@ -58,8 +58,8 @@ test('renders rows, the leftover Docker warning, an open row and a stop to confi
   assert.match(opened, /idle one/)
   const api = v.orca[0]
   assert.equal(stopText([api]), '1 Claude session, 1 MCP server, 1 dev server and 1 container', 'never the shell')
-  const asking = render(v, { ...base, confirm: { id: 'row:/w/api', keys: ['/w/api'], text: 'Stop api: 3 processes and 1 container?' } })
-  assert.match(asking, /data-confirm/)
+  const stopping = render(v, { ...base, busy: 'row:/w/api' })
+  assert.match(stopping, /aria-label="Stopping"/)
   assert.ok(!render(v, { ...base, open: new Set(['<x>']) }).includes('<x>'))
 })
 

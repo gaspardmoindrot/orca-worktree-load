@@ -48,10 +48,11 @@ function allRows(v: View): Row[] {
   return [...v.orca, ...v.other, ...v.gone]
 }
 
-function ask(id: string, rows: Row[], what: string): void {
+/** Stops right away: no confirmation, the button says "Stopping…" until it is done. */
+function stopNow(id: string, rows: Row[]): void {
   if (rows.length === 0) return
-  const keepShells = rows.some((r) => !r.gone) ? ' Terminals stay open.' : ''
-  confirm = { id, keys: rows.map((r) => r.key), text: `${rows.length > 1 ? `${what}: stop ` : 'Stop '}${stopText(rows)}?${keepShells}` }
+  confirm = { id, keys: rows.map((r) => r.key), text: stopText(rows) }
+  void runStop()
 }
 
 function say(text: string): void {
@@ -70,8 +71,7 @@ async function runStop(): Promise<void> {
   draw()
   try {
     const result = (await orca.plugin.request('load.stop', { keys: current.keys })) as { processes: number; containers: number; failed: string[] }
-    const parts = [result.processes ? `${result.processes} processes` : '', result.containers ? `${result.containers} containers` : ''].filter(Boolean)
-    const done = `Stopped ${parts.join(' and ') || 'nothing'}.`
+    const done = result.processes || result.containers ? `Stopped ${current.text}.` : 'Nothing left to stop.'
     say(result.failed.length ? `${done} Failed: ${result.failed[0]}` : done)
   } catch (error) {
     say(`Could not stop: ${error instanceof Error ? error.message : String(error)}`)
@@ -92,11 +92,13 @@ root.addEventListener('click', (event) => {
     else open.add(key)
   } else if (attr('data-stop') !== null) {
     const row = allRows(view).find((r) => r.key === attr('data-stop'))
-    if (row) ask(`row:${row.key}`, [row], row.name)
+    if (row) stopNow(`row:${row.key}`, [row])
+    return
   } else if (attr('data-stop-section') !== null) {
     const id = attr('data-stop-section')!
     const list = id === 'orca' ? view.orca : id === 'other' ? view.other : view.gone
-    ask(`section:${id}`, list, id === 'gone' ? `${list.length} Docker stacks` : `${list.length} worktrees`)
+    stopNow(`section:${id}`, list)
+    return
   } else if (target.hasAttribute('data-confirm')) {
     void runStop()
     return
