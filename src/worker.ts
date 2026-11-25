@@ -302,7 +302,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     // folder and `<owner>.<id>` once installed, so look it up.
     try {
       const list = JSON.parse(await run(ORCA, ['plugin', 'list', '--json']))
-      const key = list.result.plugins.find((p: { pluginKey: string }) => p.pluginKey.endsWith('.orca-worktree-load'))?.pluginKey
+      const key = list.result.plugins.find((p: { pluginKey: string }) => p.pluginKey.endsWith('.worktree-load'))?.pluginKey
       if (key) await run(ORCA, ['plugin', 'open', key, '--panel', 'worktree-load', '--json'])
     } catch (error) {
       orca.log(`opening the panel failed: ${error instanceof Error ? error.message : String(error)}`)
