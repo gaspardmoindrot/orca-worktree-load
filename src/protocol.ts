@@ -8,6 +8,8 @@ declare module 'orca' {
     'load.get': { output: PanelPayload }
     /** Samples now. */
     'load.refresh': { output: PanelPayload }
+    /** Stops what these worktrees run (processes but their shells, and their containers). */
+    'load.stop': { input: { keys: string[] }; output: { processes: number; containers: number; failed: string[] } }
     /** Shows the Orca worktree at `path`. */
     'load.open': { input: { path: string }; output: { opened: boolean } }
   }

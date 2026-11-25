@@ -1,6 +1,6 @@
 import { assert, test } from 'orca/testing'
 import { attribute, parseLsof, parsePs, parseTop, rollUp, type Resolver } from './model'
-import { buildView, bytes, render } from './view'
+import { buildView, bytes, render, stopText } from './view'
 import { LSOF, PS, TOP } from './fixtures'
 
 const resolver: Resolver = {
@@ -27,7 +27,7 @@ function payload() {
     machine: { memoryTotal: 24 * 2 ** 30, memoryUsed: 19 * 2 ** 30, pressure: 'normal', cores: 10, load1: 2, cpu: 300 },
     at: 1
   })
-  return { ...s, trends: { '/w/api': { memoryMb: [900, 1000, 1100], cpu: [1, 2, 3] } } }
+  return { ...s, trends: {} }
 }
 
 test('splits worktrees into Orca, other checkouts and leftover Docker', () => {
@@ -45,18 +45,22 @@ test('splits worktrees into Orca, other checkouts and leftover Docker', () => {
   assert.equal(sum, 19 * 2 ** 30, 'the bar adds up to the memory macOS reports as used')
 })
 
-test('renders rows, the leftover Docker warning and an open row', () => {
+test('renders rows, the leftover Docker warning, an open row and a stop to confirm', () => {
   const v = buildView(payload())
-  const closed = render(v, { open: new Set(), showGone: false, showIdle: false, stale: false })
+  const base = { open: new Set<string>(), showGone: false, showIdle: false, confirm: null, busy: null, notice: null }
+  const closed = render(v, base)
   assert.match(closed, /1 Docker stack left running/)
   assert.match(closed, /Orca worktrees/)
-  assert.ok(!/Biggest processes/.test(closed))
-  const opened = render(v, { open: new Set(['/w/api']), showGone: true, showIdle: true, stale: false })
-  assert.match(opened, /Biggest processes/)
-  assert.match(opened, /docker compose -p agent-9 down/)
-  assert.match(opened, /Memory, last 2 min/)
+  assert.ok(!closed.includes('Open in Orca'))
+  const opened = render(v, { ...base, open: new Set(['/w/api']), showGone: true, showIdle: true })
+  assert.match(opened, /Open in Orca/)
+  assert.match(opened, /Claude sessions/)
   assert.match(opened, /idle one/)
-  assert.ok(!render(v, { open: new Set(['<x>']), showGone: false, showIdle: false, stale: true }).includes('<x>'))
+  const api = v.orca[0]
+  assert.equal(stopText([api]), '1 Claude session, 1 MCP server, 1 dev server and 1 container', 'never the shell')
+  const asking = render(v, { ...base, confirm: { id: 'row:/w/api', keys: ['/w/api'], text: 'Stop api: 3 processes and 1 container?' } })
+  assert.match(asking, /data-confirm/)
+  assert.ok(!render(v, { ...base, open: new Set(['<x>']) }).includes('<x>'))
 })
 
 test('formats bytes', () => {

@@ -12,7 +12,7 @@ test('samples, updates the status bar and answers the panel', async () => {
     if (name === 'top') return TOP
     if (name === 'lsof') return LSOF
     if (name === 'sysctl') return '2\n'
-    if (name === 'docker') return args[0] === 'ps' ? DOCKER_PS : DOCKER_STATS
+    if (name === 'docker') return args[0] === 'ps' ? DOCKER_PS : args[0] === 'stats' ? DOCKER_STATS : ''
     throw new Error(`unexpected ${bin}`)
   })
   const host = mockHost({
@@ -28,6 +28,9 @@ test('samples, updates the status bar and answers the panel', async () => {
     }
   })
   main.setFirstGap(0)
+  main.setKillAfter(0)
+  const signals: string[] = []
+  main.setSignal((pid, sig) => (signals.push(`${sig} ${pid}`), true))
   const worker = await mountWorker(main, { host })
   try {
     const s = await worker.request('load.refresh')
@@ -40,6 +43,10 @@ test('samples, updates the status bar and answers the panel', async () => {
     assert.equal(worker.host.callsOf('notifications.show').length, 1, 'one alert for the pressure episode')
     assert.deepEqual(await worker.request('load.open', { path: '/w/api' }), { opened: true })
     assert.deepEqual(worker.host.callsOf('workspace.open').at(-1), { workspaceId: 'ws-api' })
+    const result = await worker.request('load.stop', { keys: ['/w/api'] })
+    assert.equal(result.processes, 3, 'claude, its MCP server and vite; never the shell')
+    assert.deepEqual(signals.filter((s) => s.startsWith('SIGTERM')).sort(), ['SIGTERM 201', 'SIGTERM 202', 'SIGTERM 203'])
+    assert.ok(seen.includes('docker'))
     assert.deepEqual(worker.refusals, [])
   } finally {
     await worker.deactivate()

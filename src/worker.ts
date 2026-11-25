@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs'
 import { homedir, loadavg, totalmem, cpus, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
+import { planStop, stillSame } from './stop'
 import {
   attribute,
   formatBytes,
@@ -26,6 +27,8 @@ import {
   type History,
   type Machine,
   type OrcaWorktree,
+  type OwnerKey,
+  type Proc,
   type PanelPayload,
   type Resolver,
   type Snapshot
@@ -83,6 +86,10 @@ let normalSince: number | null = null
 let ticking: Promise<Snapshot> | null = null
 let timer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
+/** The last sample's processes and owners, which Stop works from. */
+let lastProcs: Proc[] = []
+let lastOwners = new Map<number, OwnerKey>()
+let lastResolver: Resolver | null = null
 
 async function setting<T>(orca: OrcaWorkerApi, key: string, fallback: T): Promise<T> {
   const v = await orca.settings.get(key).catch(() => null)
@@ -235,6 +242,9 @@ async function sample(orca: OrcaWorkerApi): Promise<Snapshot> {
 
     const resolver = makeResolver(await setting(orca, 'includeOtherCheckouts', true))
     const owners = attribute(procs, new Map([...cwds].map(([pid, v]) => [pid, v.cwd])), resolver, homedir())
+    lastProcs = procs
+    lastOwners = owners
+    lastResolver = resolver
     const cpuSum = [...cpu.values()].reduce((a, b) => a + b, 0)
     last = rollUp({ procs, owners, cpu, memory: footprints, orcaWorktrees, containers, resolver, machine: await readMachine(cpuSum), at: now })
     history = record(history, last, BUCKET_MS, BUCKETS)
@@ -280,6 +290,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   stopped = false
   orca.panels.handle('load.get', async () => payload(last ?? (await tick(orca))))
   orca.panels.handle('load.refresh', async () => payload(await tick(orca)))
+  orca.panels.handle('load.stop', async ({ keys }) => stop(orca, keys))
   orca.panels.handle('load.open', async ({ path }) => {
     const target = orcaWorktrees.find((w) => w.path === path)
     if (!target) return { opened: false }
@@ -301,6 +312,80 @@ export default function activate(orca: OrcaWorkerApi): void {
   void loop(orca)
 }
 
+/** This worker and every process above it: Stop never signals them. */
+function protectedPids(procs: readonly Proc[]): Set<number> {
+  const byPid = new Map(procs.map((p) => [p.pid, p]))
+  const out = new Set<number>([process.pid])
+  let pid = process.ppid
+  while (pid > 1 && !out.has(pid)) {
+    out.add(pid)
+    pid = byPid.get(pid)?.ppid ?? 1
+  }
+  return out
+}
+
+type Signal = (pid: number, sig: 'SIGTERM' | 'SIGKILL') => boolean
+const realSignal: Signal = (pid, sig) => {
+  try {
+    process.kill(pid, sig)
+    return true
+  } catch {
+    return false
+  }
+}
+let signal: Signal = realSignal
+/** Tests swap it: their process list is fake, a real signal would hit a real PID. */
+export function setSignal(s: Signal): void {
+  signal = s
+}
+
+export type StopResult = { processes: number; containers: number; failed: string[] }
+
+/** Stops what the worktrees in `keys` run: SIGTERM, then SIGKILL 3 s later for what is left. */
+async function stop(orca: OrcaWorkerApi, keys: string[]): Promise<StopResult> {
+  if (!lastResolver) await tick(orca)
+  const plans = planStop({ keys, procs: lastProcs, owners: lastOwners, containers, resolver: lastResolver!, protectedPids: protectedPids(lastProcs) })
+  const failed: string[] = []
+  const planned = plans.flatMap((p) => p.processes)
+  // Check again right before signalling: a PID can be reused between the sample and the click.
+  const now = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
+  const targets = stillSame(planned, now)
+  for (const pid of targets) signal(pid, 'SIGTERM')
+
+  let stoppedContainers = 0
+  const ids = plans.flatMap((p) => p.containers)
+  if (ids.length && DOCKER) {
+    await run(DOCKER, ['stop', ...ids], { timeout: 60000 }).then(
+      () => (stoppedContainers += ids.length),
+      (e) => failed.push(`docker stop: ${e instanceof Error ? e.message : String(e)}`)
+    )
+  }
+  for (const project of plans.flatMap((p) => p.projects)) {
+    if (!DOCKER) break
+    const count = containers.filter((c) => c.project === project).length
+    await run(DOCKER, ['compose', '-p', project, 'down'], { timeout: 120000 }).then(
+      () => (stoppedContainers += count),
+      (e) => failed.push(`${project}: ${e instanceof Error ? e.message : String(e)}`)
+    )
+  }
+
+  if (targets.length) {
+    await new Promise((r) => setTimeout(r, killAfterMs))
+    const after = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
+    for (const pid of stillSame(planned.filter((p) => targets.includes(p.pid)), after)) signal(pid, 'SIGKILL')
+  }
+  orca.log(`stopped ${keys.join(', ')}: ${targets.length} processes, ${stoppedContainers} containers${failed.length ? `, failed: ${failed.join('; ')}` : ''}`)
+  lastDocker = 0 // read Docker again on the next sample
+  await tick(orca).catch(() => undefined)
+  return { processes: targets.length, containers: stoppedContainers, failed }
+}
+
+let killAfterMs = 3000
+/** Tests do not wait 3 s before SIGKILL. */
+export function setKillAfter(ms: number): void {
+  killAfterMs = ms
+}
+
 export function deactivate(): void {
   stopped = true
   clearTimeout(timer)
@@ -316,5 +401,10 @@ export function deactivate(): void {
   lastTop = lastDocker = lastOrca = lastFullLsof = 0
   pressureSince = normalSince = null
   firstGapMs = 1000
+  killAfterMs = 3000
+  signal = realSignal
+  lastProcs = []
+  lastOwners = new Map()
+  lastResolver = null
   ticking = null
 }
