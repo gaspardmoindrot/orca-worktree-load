@@ -31,7 +31,6 @@ const real: System = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-
 // The worker's PATH may be minimal: use absolute paths.
 const first = (paths: string[], fallback: string) => paths.find((p) => existsSync(p)) ?? fallback
 
