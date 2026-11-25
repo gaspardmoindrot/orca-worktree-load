@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- No more notifications. Memory pressure still shows in the status bar, orange or red.
+- Removed the "Notify on memory pressure" setting.
+
+Asks for `workspace:read`, `workspace:write` and `settings:own`: no longer `notifications:show`.
+
 ## 0.5.0
 
 First public release.

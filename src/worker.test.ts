@@ -24,11 +24,10 @@ test('samples, updates the status bar, answers the panel and stops a worktree', 
   }, { docker: '/usr/local/bin/docker' })
   main.testing.fast = true
   const host = mockHost({
-    capabilities: ['workspace:read', 'workspace:write', 'notifications:show', 'settings:own'],
+    capabilities: ['workspace:read', 'workspace:write', 'settings:own'],
     settings: { intervalSeconds: 300 },
     results: {
       'workspace.open': { opened: true },
-      'notifications.show': { delivered: true },
       'workspace.list': { workspaces: [{ id: 'ws-api', kind: 'worktree', name: 'api', project: 'demo', path: '/w/api', branch: 'feat/api', hostId: null }], truncated: false }
     }
   })
@@ -38,7 +37,7 @@ test('samples, updates the status bar, answers the panel and stops a worktree', 
     assert.ok(s.worktrees.some((w) => w.key === '/w/api' && w.orca), 'the Orca worktree is there')
     assert.equal(s.machine.pressure, 'warning')
     assert.match(String((worker.host.callsOf('statusBar.update').at(-1) as { text: string }).text), / in \d+ worktrees?$/)
-    assert.equal(worker.host.callsOf('notifications.show').length, 1, 'one alert for the pressure episode')
+    assert.equal(worker.host.callsOf('notifications.show').length, 0, 'no notification, even under memory pressure')
 
     assert.deepEqual(await worker.request('load.open', { path: '/w/api' }), { opened: true })
     assert.deepEqual(worker.host.callsOf('workspace.open').at(-1), { workspaceId: 'ws-api' })

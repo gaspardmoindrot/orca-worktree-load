@@ -1,35 +1,33 @@
 // The plugin's worker. Orca keeps it running because the manifest declares a status bar item.
-// Every `intervalSeconds` it samples (src/sampler.ts), updates the status bar, posts the snapshot
-// to the panel, and notifies once per episode of high memory pressure.
+// Every `intervalSeconds` it samples (src/sampler.ts), updates the status bar and posts the
+// snapshot to the panel.
 // Orca transpiles this file when it loads: no build step.
 import type { OrcaWorkerApi } from 'orca/worker'
-import { totalOf, type OrcaWorktree, type Snapshot } from './model'
+import type { OrcaWorktree, Snapshot } from './model'
 import { Sampler, type Settings } from './sampler'
 import { BIN, system } from './system'
-import { buildView, bytes, statusBar } from './view'
+import { buildView, statusBar } from './view'
 
-const DEFAULTS = { intervalSeconds: 5, dockerSeconds: 30, includeOtherCheckouts: true, notify: true }
+const DEFAULTS = { intervalSeconds: 5, dockerSeconds: 30, includeOtherCheckouts: true }
 
 let sampler: Sampler | null = null
 let timer: ReturnType<typeof setTimeout> | undefined
 let inFlight: Promise<Snapshot> | null = null
-let pressure: { since: number | null; normalSince: number | null } = { since: null, normalSince: null }
 
 /** Tests only: no wait between the first two readings, nor before SIGKILL. */
 export const testing = { fast: false }
 
-async function readSettings(orca: OrcaWorkerApi): Promise<Settings & { notify: boolean }> {
+async function readSettings(orca: OrcaWorkerApi): Promise<Settings> {
   const read = async <K extends keyof typeof DEFAULTS>(key: K): Promise<(typeof DEFAULTS)[K]> => {
     const value = await orca.settings.get(key).catch(() => null)
     return typeof value === typeof DEFAULTS[key] ? (value as (typeof DEFAULTS)[K]) : DEFAULTS[key]
   }
-  const [intervalSeconds, dockerSeconds, includeOtherCheckouts, notify] = await Promise.all([
+  const [intervalSeconds, dockerSeconds, includeOtherCheckouts] = await Promise.all([
     read('intervalSeconds'),
     read('dockerSeconds'),
-    read('includeOtherCheckouts'),
-    read('notify')
+    read('includeOtherCheckouts')
   ])
-  return { intervalSeconds: Math.min(300, Math.max(2, intervalSeconds)), dockerSeconds, includeOtherCheckouts, notify }
+  return { intervalSeconds: Math.min(300, Math.max(2, intervalSeconds)), dockerSeconds, includeOtherCheckouts }
 }
 
 async function listWorktrees(orca: OrcaWorkerApi): Promise<OrcaWorktree[]> {
@@ -42,27 +40,6 @@ async function listWorktrees(orca: OrcaWorkerApi): Promise<OrcaWorktree[]> {
     orca.log(`workspace.list failed: ${error instanceof Error ? error.message : String(error)}`)
     return []
   }
-}
-
-/** One notification per episode of high memory pressure; an episode ends after a minute of normal. */
-async function notifyPressure(orca: OrcaWorkerApi, s: Snapshot, enabled: boolean): Promise<void> {
-  const now = Date.now()
-  if (s.machine.pressure === 'normal') {
-    pressure.normalSince ??= now
-    if (now - pressure.normalSince > 60_000) pressure.since = null
-    return
-  }
-  pressure.normalSince = null
-  if (pressure.since !== null) return
-  pressure.since = now
-  if (!enabled) return
-  const heaviest = [...s.worktrees].sort((a, b) => totalOf(b).memory - totalOf(a).memory)[0]
-  await orca.host
-    .call('notifications.show', {
-      title: `Memory pressure ${s.machine.pressure === 'critical' ? 'critical' : 'high'}`,
-      body: heaviest ? `Heaviest worktree: ${heaviest.name} (${bytes(totalOf(heaviest).memory)})` : 'No worktree is running anything.'
-    })
-    .catch(() => undefined)
 }
 
 /** Samples once (or joins the sample in flight), then publishes it unless the worker stopped. */
@@ -83,7 +60,6 @@ async function tick(orca: OrcaWorkerApi, own: Sampler): Promise<Snapshot> {
   if (own.disposed) return s
   await orca.host.call('statusBar.update', { id: 'worktree-load', ...statusBar(buildView(s), s.error) }).catch(() => undefined)
   orca.panels.post('load.snapshot', s)
-  await notifyPressure(orca, s, settings.notify)
   return s
 }
 
@@ -134,5 +110,4 @@ export function deactivate(): void {
   sampler = null
   clearTimeout(timer)
   inFlight = null
-  pressure = { since: null, normalSince: null }
 }

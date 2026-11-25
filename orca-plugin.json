@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "worktree-load",
   "name": "Worktree Load",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "What each worktree costs your Mac: memory and CPU of its agents, MCP servers, dev servers and Docker containers, in Orca's right sidebar, with a Stop button per worktree. Local, no network. macOS.",
   "author": {
     "name": "gaspardmoindrot",
@@ -88,13 +88,6 @@
         "description": "Worktrees made by Claude Code, other tools or by hand, found by their .git.",
         "type": "boolean",
         "default": true
-      },
-      {
-        "key": "notify",
-        "title": "Notify on memory pressure",
-        "description": "One notification per episode, naming the heaviest worktree.",
-        "type": "boolean",
-        "default": true
       }
     ]
   },
@@ -104,9 +97,6 @@
     },
     {
       "kind": "workspace:write"
-    },
-    {
-      "kind": "notifications:show"
     },
     {
       "kind": "settings:own"

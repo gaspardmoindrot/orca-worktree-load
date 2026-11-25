@@ -56,7 +56,6 @@ Then open it from the gauge icon in the right sidebar, or click its item in the 
 - **Open a row** to see where the memory goes: MCP servers by name (`MCP · Playwright ×4`), Claude or Codex sessions, dev servers, tests, builds, shells, Docker. **Open in Orca** jumps to the worktree.
 - **Docker stacks left running** by worktrees you already deleted, with their memory.
 - **Status bar**: `5.4 GB in 5 worktrees`, orange or red with macOS memory pressure. Click it to open the panel.
-- **One notification per episode of memory pressure**, naming the heaviest worktree.
 
 Worktrees that only have open terminals are folded into "N idle worktrees".
 
@@ -89,7 +88,6 @@ Nothing leaves your Mac: no network calls, no telemetry. Nothing is written to d
 |---|---|
 | `workspace:read` | Know which folders are Orca worktrees, with their names and branches |
 | `workspace:write` | **Open in Orca** |
-| `notifications:show` | The memory pressure notification |
 | `settings:own` | The settings below |
 
 Like every plugin with a worker, it runs as you on your Mac. The commands it runs: `ps`, `lsof`, `top`, `sysctl`, `docker ps` and `docker stats`; only when you click Stop, signals and `docker stop` or `docker compose down`; and `orca plugin open` when you click the status bar item.
@@ -103,7 +101,6 @@ In Orca: **Settings → Plugins → Worktree Load**.
 | Sample every (seconds) | 5 | How often every process is read |
 | Read Docker every (seconds) | 30 | `docker stats` takes about a second and a half; 0 turns Docker off |
 | Count git checkouts Orca does not manage | on | Worktrees made by Claude Code, other tools or by hand, found by their `.git` |
-| Notify on memory pressure | on | One notification per episode |
 
 ## Requirements and limits
 
