@@ -21,7 +21,7 @@ test('samples, updates the status bar, answers the panel and stops a worktree', 
     },
     signal: (pid, sig) => (signals.push(`${sig} ${pid}`), true),
     sleep: async () => undefined
-  })
+  }, { docker: '/usr/local/bin/docker' })
   main.testing.fast = true
   const host = mockHost({
     capabilities: ['workspace:read', 'workspace:write', 'notifications:show', 'settings:own'],

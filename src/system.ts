@@ -31,12 +31,6 @@ const real: System = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export let system: System = real
-
-/** Tests only: replace part of the system; call with no argument to restore it. */
-export function useSystem(fake?: Partial<System>): void {
-  system = fake ? { ...real, ...fake } : real
-}
 
 // The worker's PATH may be minimal: use absolute paths.
 const first = (paths: string[], fallback: string) => paths.find((p) => existsSync(p)) ?? fallback
@@ -51,3 +45,14 @@ export const BIN = {
 }
 
 export const PS_ARGS = ['-Ao', 'pid=,ppid=,time=,rss=,command=']
+
+const REAL_BIN = { ...BIN }
+
+export let system: System = real
+
+/** Tests only: replace part of the system, and binaries a CI machine may lack (docker); call
+ *  with no argument to restore both. */
+export function useSystem(fake?: Partial<System>, bins: Partial<typeof BIN> = {}): void {
+  system = fake ? { ...real, ...fake } : real
+  Object.assign(BIN, REAL_BIN, fake ? bins : {})
+}
