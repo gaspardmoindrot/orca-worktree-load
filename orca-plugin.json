@@ -1,0 +1,100 @@
+{
+  "manifestVersion": 2,
+  "id": "orca-worktree-load",
+  "name": "Worktree Load",
+  "version": "0.1.0",
+  "description": "CPU, RAM, agents, git diff and disk size of every worktree Orca created, in the status bar and a sidebar panel. Notifies when one stays heavy.",
+  "engines": {
+    "orca": ">=1.4.260"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "worktree-load",
+        "title": "Worktree Load",
+        "icon": "gauge",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      {
+        "id": "worktreeLoad.refresh",
+        "title": "Worktree Load: refresh and show the heaviest worktree",
+        "when": "global"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "worktree-load",
+        "text": "Load\u2026",
+        "icon": "gauge",
+        "tone": "neutral",
+        "tooltip": "Worktree load",
+        "command": "worktreeLoad.refresh"
+      }
+    ],
+    "settings": [
+      {
+        "key": "intervalSeconds",
+        "title": "Poll every (seconds)",
+        "description": "How often to read CPU and RAM per worktree.",
+        "type": "integer",
+        "default": 10,
+        "minimum": 3,
+        "maximum": 300
+      },
+      {
+        "key": "cpuThreshold",
+        "title": "Heavy CPU (% of one core)",
+        "description": "A worktree above this is flagged.",
+        "type": "integer",
+        "default": 150,
+        "minimum": 10,
+        "maximum": 5000
+      },
+      {
+        "key": "memoryThresholdMb",
+        "title": "Heavy RAM (MB)",
+        "description": "A worktree above this is flagged; twice this turns the status bar red.",
+        "type": "integer",
+        "default": 4096,
+        "minimum": 100,
+        "maximum": 262144
+      },
+      {
+        "key": "notify",
+        "title": "Notify when a worktree stays heavy",
+        "description": "After 3 polls in a row over a threshold.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "diskMinutes",
+        "title": "Disk scan every (minutes)",
+        "description": "Runs du on every worktree. 0 turns it off.",
+        "type": "integer",
+        "default": 10,
+        "minimum": 0,
+        "maximum": 1440
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "settings:own"
+    }
+  ]
+}
