@@ -55,13 +55,13 @@ export function sortRows(list: readonly OwnerLoad[], s: TableSort): OwnerLoad[] 
 
 const isRunning = (w: OwnerLoad) => w.processes > 0 || w.docker.containers.length > 0
 
-export function toRow(w: OwnerLoad, trend: number[] | undefined): TableRow {
+export function toRow(w: OwnerLoad, trend: number[] | undefined, cores: number): TableRow {
   const t = totalOf(w)
   return {
     key: w.key,
     cells: {
       name: w.gone ? `${w.name} (deleted)` : w.orca ? w.name : `${w.name} ·`,
-      cpu: isRunning(w) ? formatCpu(t.cpu) : '',
+      cpu: isRunning(w) ? formatCpu(t.cpu, cores) : '',
       memory: isRunning(w) ? formatBytes(t.memory) : '',
       trend: trend && trend.length > 1 ? sparkline(trend.slice(-40)) : '',
       docker: w.docker.containers.length ? formatBytes(w.docker.memory) : '',
@@ -79,7 +79,7 @@ const COLUMNS = [
   { key: 'processes', label: 'Procs', align: 'end' as const, sortable: true, hideBelow: 'md' as const }
 ]
 
-function Detail({ w, trend }: { w: OwnerLoad; trend?: PanelPayload['trends'][string] }) {
+function Detail({ w, trend, cores }: { w: OwnerLoad; trend?: PanelPayload['trends'][string]; cores: number }) {
   const t = totalOf(w)
   const kinds = Object.entries(w.kinds)
     .filter(([, v]) => v && (v.memory > 0 || v.cpu > 0))
@@ -91,7 +91,7 @@ function Detail({ w, trend }: { w: OwnerLoad; trend?: PanelPayload['trends'][str
     >
       <Stack gap="sm">
         <Text>
-          {formatBytes(t.memory)} · {formatCpu(t.cpu)} · {w.processes} processes{w.agentState ? ` · agent ${w.agentState}` : ''}
+          {formatBytes(t.memory)} · {formatCpu(t.cpu, cores)} · {w.processes} processes{w.agentState ? ` · agent ${w.agentState}` : ''}
         </Text>
         {trend && trend.memoryMb.length > 1 ? <Text muted size="xs">Memory, last hour: {sparkline(trend.memoryMb)}</Text> : null}
         <KeyValue
@@ -99,10 +99,10 @@ function Detail({ w, trend }: { w: OwnerLoad; trend?: PanelPayload['trends'][str
           items={[
             ...kinds.map(([kind, v]) => ({
               label: KIND_LABEL[kind as Kind],
-              value: `${formatBytes(v!.memory)} · ${formatCpu(v!.cpu)} · ${v!.count}×`
+              value: `${formatBytes(v!.memory)} · ${formatCpu(v!.cpu, cores)} · ${v!.count}×`
             })),
             ...(w.docker.containers.length
-              ? [{ label: 'Docker (share of the VM)', value: `${formatBytes(w.docker.memory)} · ${formatCpu(w.docker.cpu)} · ${w.docker.containers.length} containers` }]
+              ? [{ label: 'Docker (share of the VM)', value: `${formatBytes(w.docker.memory)} · ${formatCpu(w.docker.cpu, cores)} · ${w.docker.containers.length} containers` }]
               : [])
           ]}
         />
@@ -116,7 +116,7 @@ function Detail({ w, trend }: { w: OwnerLoad; trend?: PanelPayload['trends'][str
               { key: 'cpu', label: 'CPU', align: 'end' },
               { key: 'pid', label: 'PID', align: 'end', hideBelow: 'md' }
             ]}
-            rows={w.top.map((p) => ({ key: String(p.pid), cells: { name: p.name, kind: KIND_LABEL[p.kind], memory: formatBytes(p.memory), cpu: formatCpu(p.cpu), pid: p.pid } }))}
+            rows={w.top.map((p) => ({ key: String(p.pid), cells: { name: p.name, kind: KIND_LABEL[p.kind], memory: formatBytes(p.memory), cpu: formatCpu(p.cpu, cores), pid: p.pid } }))}
             maxHeight="sm"
           />
         ) : null}
@@ -128,7 +128,7 @@ function Detail({ w, trend }: { w: OwnerLoad; trend?: PanelPayload['trends'][str
               { key: 'memory', label: 'In the VM', align: 'end' },
               { key: 'cpu', label: 'CPU', align: 'end' }
             ]}
-            rows={w.docker.containers.map((c) => ({ key: c.name, cells: { name: c.name, memory: formatBytes(c.memory), cpu: formatCpu(c.cpu) } }))}
+            rows={w.docker.containers.map((c) => ({ key: c.name, cells: { name: c.name, memory: formatBytes(c.memory), cpu: formatCpu(c.cpu, cores) } }))}
             maxHeight="sm"
           />
         ) : null}
@@ -179,10 +179,10 @@ export default function Panel() {
       <KeyValue
         items={[
           { label: 'Mac', value: `${m.memoryUsed ? `${formatBytes(m.memoryUsed)} / ` : ''}${formatBytes(m.memoryTotal)} · load ${m.load1.toFixed(1)} on ${m.cores} cores` },
-          { label: `In ${running.length} worktrees`, value: `${formatBytes(inWorktrees.memory)} · ${formatCpu(inWorktrees.cpu)}` },
+          { label: `In ${running.length} worktrees`, value: `${formatBytes(inWorktrees.memory)} · ${formatCpu(inWorktrees.cpu, m.cores)}` },
           { label: 'Docker, not in a worktree', value: `${formatBytes(s.dockerVm.memory)}${dockerAttributed ? ` (+ ${formatBytes(dockerAttributed)} counted in worktrees)` : ''}` },
-          { label: 'Orca app', value: `${formatBytes(s.orcaApp.memory)} · ${formatCpu(s.orcaApp.cpu)}` },
-          { label: 'Everything else', value: `${formatBytes(s.other.memory)} · ${formatCpu(s.other.cpu)}` }
+          { label: 'Orca app', value: `${formatBytes(s.orcaApp.memory)} · ${formatCpu(s.orcaApp.cpu, m.cores)}` },
+          { label: 'Everything else', value: `${formatBytes(s.other.memory)} · ${formatCpu(s.other.cpu, m.cores)}` }
         ]}
       />
       {total && total.memoryMb.length > 1 ? <Text muted size="xs">All processes, last hour: {sparkline(total.memoryMb)}</Text> : null}
@@ -195,7 +195,7 @@ export default function Panel() {
       <Table
         label="Worktrees"
         columns={COLUMNS}
-        rows={sortRows(shown, read(sort)).map((w) => toRow(w, s.trends[w.key]?.memoryMb))}
+        rows={sortRows(shown, read(sort)).map((w) => toRow(w, s.trends[w.key]?.memoryMb, m.cores))}
         sort={read(sort)}
         onSortChange={(next) => set(sort, next)}
         selectionMode="single"
@@ -205,9 +205,9 @@ export default function Panel() {
         emptyText="No worktree is running anything."
         maxHeight="md"
       />
-      {pick ? <Detail w={pick} trend={s.trends[pick.key]} /> : <Text muted size="xs">Select a worktree for its processes and containers.</Text>}
+      {pick ? <Detail w={pick} trend={s.trends[pick.key]} cores={m.cores} /> : <Text muted size="xs">Select a worktree for its processes and containers.</Text>}
       <Text muted size="xs">
-        Memory is the footprint Activity Monitor shows; CPU is % of one core. A name ending in · is a git checkout Orca does not manage. Docker is the worktree's share of the Docker VM, split by its compose containers' memory and CPU.
+        Memory is the footprint Activity Monitor shows. CPU is the share of the whole Mac, averaged over the last 30 s. A name ending in · is a git checkout Orca does not manage. Docker is the worktree's share of the Docker VM, split by its compose containers' memory and CPU.
       </Text>
     </Stack>
   )

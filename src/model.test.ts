@@ -87,7 +87,7 @@ test('rolls up memory, CPU and Docker per worktree, without counting containers 
 
   const bar = statusBar(s)
   assert.equal(bar.tone, 'warning')
-  assert.match(bar.text, /in 3 worktrees$/)
+  assert.equal(bar.text, '3.3 GB in 3 worktrees')
 
   let h = record({}, s, 30_000, 120)
   h = record(h, { ...s, at: 1_010_000 }, 30_000, 120)
@@ -95,4 +95,10 @@ test('rolls up memory, CPU and Docker per worktree, without counting containers 
   h = record(h, { ...s, at: 1_040_000 }, 30_000, 120)
   assert.equal(h['/w/api'].length, 2)
   assert.equal(sparkline([0, 50, 100], 100), '▁▅█')
+})
+
+test('shows CPU as a share of the whole Mac', async () => {
+  const { formatCpu } = await import('./model')
+  assert.equal(formatCpu(129, 18), '7.2%')
+  assert.equal(formatCpu(1800, 18), '100%')
 })

@@ -51,6 +51,7 @@ const PS = '/bin/ps'
 const TOP = '/usr/bin/top'
 const LSOF = '/usr/sbin/lsof'
 const SYSCTL = '/usr/sbin/sysctl'
+const ORCA = find(['/usr/local/bin/orca', '/opt/homebrew/bin/orca', '/Applications/Orca.app/Contents/Resources/bin/orca'], 'orca')
 const DOCKER = find(['/usr/local/bin/docker', '/opt/homebrew/bin/docker', join(homedir(), '.docker/bin/docker')], '')
 
 const BUCKET_MS = 30_000
@@ -64,7 +65,9 @@ const BUCKETS = 120 // one hour
 // --- state (module level, so deactivate can reset it) -------------------------------------------
 let last: Snapshot | null = null
 let history: History = {}
-let prevCpu = new Map<number, { seconds: number; at: number }>()
+/** Each process's CPU-time readings over the last 30 s: CPU is averaged over that window. */
+let readings = new Map<number, { seconds: number; at: number }[]>()
+const CPU_WINDOW_MS = 30_000
 let cwds = new Map<number, { cwd: string; command: string }>()
 let footprints = new Map<number, number>()
 let physUsed: number | null = null
@@ -208,9 +211,9 @@ async function sample(orca: OrcaWorkerApi): Promise<Snapshot> {
   try {
     await refreshOrca(orca, now)
     let procs = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
-    if (prevCpu.size === 0) {
+    if (readings.size === 0) {
       // CPU is a difference between two readings: take a second one a second later.
-      for (const p of procs) prevCpu.set(p.pid, { seconds: p.cpuSeconds, at: Date.now() })
+      for (const p of procs) readings.set(p.pid, [{ seconds: p.cpuSeconds, at: Date.now() }])
       await new Promise((r) => setTimeout(r, firstGapMs))
       procs = parsePs(await run(PS, ['-Ao', 'pid=,ppid=,time=,rss=,command=']))
     }
@@ -218,14 +221,17 @@ async function sample(orca: OrcaWorkerApi): Promise<Snapshot> {
 
     const readAt = Date.now()
     const cpu = new Map<number, number>()
-    const nextCpu = new Map<number, { seconds: number; at: number }>()
+    const next = new Map<number, { seconds: number; at: number }[]>()
     for (const p of procs) {
-      const prev = prevCpu.get(p.pid)
-      if (prev && readAt > prev.at) cpu.set(p.pid, Math.max(0, ((p.cpuSeconds - prev.seconds) / ((readAt - prev.at) / 1000)) * 100))
+      // Drop readings older than the window, but keep the oldest one inside it, and drop them all
+      // if the PID was reused (its CPU time went down).
+      const kept = (readings.get(p.pid) ?? []).filter((r) => r.at >= readAt - CPU_WINDOW_MS && r.seconds <= p.cpuSeconds)
+      const oldest = kept[0]
+      if (oldest && readAt > oldest.at) cpu.set(p.pid, ((p.cpuSeconds - oldest.seconds) / ((readAt - oldest.at) / 1000)) * 100)
       else if (last) cpu.set(p.pid, Math.min(100 * cpus().length, (p.cpuSeconds / Math.max(1, (readAt - last.at) / 1000)) * 100))
-      nextCpu.set(p.pid, { seconds: p.cpuSeconds, at: readAt })
+      next.set(p.pid, [...kept, { seconds: p.cpuSeconds, at: readAt }])
     }
-    prevCpu = nextCpu
+    readings = next
 
     const resolver = makeResolver(await setting(orca, 'includeOtherCheckouts', true))
     const owners = attribute(procs, new Map([...cwds].map(([pid, v]) => [pid, v.cwd])), resolver, homedir())
@@ -280,7 +286,18 @@ export default function activate(orca: OrcaWorkerApi): void {
     await orca.host.call('workspace.open', { workspaceId: target.id })
     return { opened: true }
   })
-  orca.commands.register('worktreeLoad.refresh', async () => statusBar(await tick(orca)).tooltip)
+  orca.commands.register('worktreeLoad.show', async () => {
+    // The host API cannot open a panel; Orca's CLI can. The key is `local.<id>` for a development
+    // folder and `<owner>.<id>` once installed, so look it up.
+    try {
+      const list = JSON.parse(await run(ORCA, ['plugin', 'list', '--json']))
+      const key = list.result.plugins.find((p: { pluginKey: string }) => p.pluginKey.endsWith('.orca-worktree-load'))?.pluginKey
+      if (key) await run(ORCA, ['plugin', 'open', key, '--panel', 'worktree-load', '--json'])
+    } catch (error) {
+      orca.log(`opening the panel failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return undefined
+  })
   void loop(orca)
 }
 
@@ -289,7 +306,7 @@ export function deactivate(): void {
   clearTimeout(timer)
   last = null
   history = {}
-  prevCpu = new Map()
+  readings = new Map()
   cwds = new Map()
   footprints = new Map()
   physUsed = null

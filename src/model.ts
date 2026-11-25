@@ -392,23 +392,28 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
-export function formatCpu(cpu: number): string {
-  return `${cpu < 10 ? cpu.toFixed(1) : Math.round(cpu)}%`
+/** CPU in % of the whole Mac: `cpu` is in % of one core, so 1800% on 18 cores is 100%. */
+export function formatCpu(cpu: number, cores: number): string {
+  const share = cpu / Math.max(1, cores)
+  return `${share < 10 ? share.toFixed(1) : Math.round(share)}%`
 }
 
 export const totalOf = (o: OwnerLoad) => ({ cpu: o.cpu + o.docker.cpu, memory: o.memory + o.docker.memory })
 
 export function statusBar(s: Snapshot): { text: string; tone: 'neutral' | 'warning' | 'danger'; tooltip: string } {
-  if (s.error && s.worktrees.length === 0) return { text: 'Load: ?', tone: 'warning', tooltip: s.error }
+  if (s.error && s.worktrees.length === 0) return { text: 'Worktrees: ?', tone: 'warning', tooltip: s.error }
   const live = s.worktrees.filter((w) => w.processes > 0 || w.docker.containers.length > 0)
-  const sum = live.reduce((acc, w) => ({ cpu: acc.cpu + totalOf(w).cpu, memory: acc.memory + totalOf(w).memory }), { cpu: 0, memory: 0 })
-  const top = [...live].sort((a, b) => totalOf(b).memory - totalOf(a).memory).slice(0, 3)
+  const memory = live.reduce((n, w) => n + totalOf(w).memory, 0)
+  const heaviest = [...live].sort((a, b) => totalOf(b).memory - totalOf(a).memory)[0]
   const m = s.machine
+  // Orca shows the tooltip on one line: keep it short.
   const tooltip = [
-    `${live.length} worktrees running: ${formatBytes(sum.memory)} · ${formatCpu(sum.cpu)}`,
-    `Machine: ${m.memoryUsed ? `${formatBytes(m.memoryUsed)} / ` : ''}${formatBytes(m.memoryTotal)} · pressure ${m.pressure} · load ${m.load1.toFixed(1)}`,
-    ...top.map((w) => `${w.name}: ${formatBytes(totalOf(w).memory)} · ${formatCpu(totalOf(w).cpu)}`)
-  ].join('\n')
+    heaviest ? `Heaviest: ${heaviest.name} ${formatBytes(totalOf(heaviest).memory)}` : null,
+    m.memoryUsed ? `Mac: ${formatBytes(m.memoryUsed)} of ${formatBytes(m.memoryTotal)} used` : null,
+    'Click for details'
+  ]
+    .filter(Boolean)
+    .join(' · ')
   const tone = m.pressure === 'critical' ? 'danger' : m.pressure === 'warning' ? 'warning' : 'neutral'
-  return { text: `${formatBytes(sum.memory)} · ${formatCpu(sum.cpu)} in ${live.length} worktrees`, tone, tooltip }
+  return { text: `${formatBytes(memory)} in ${live.length} worktrees`, tone, tooltip }
 }

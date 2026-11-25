@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "orca-worktree-load",
   "name": "Worktree Load",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "What each worktree costs your Mac: CPU and memory of every process it started (agents, MCP servers, dev servers, tests) and of its Docker containers, with the last hour. macOS.",
   "engines": {
     "orca": ">=1.4.260"
@@ -22,19 +22,19 @@
     ],
     "commands": [
       {
-        "id": "worktreeLoad.refresh",
-        "title": "Worktree Load: sample now",
+        "id": "worktreeLoad.show",
+        "title": "Worktree Load: show the panel",
         "when": "global"
       }
     ],
     "statusBarItems": [
       {
         "id": "worktree-load",
-        "text": "Load\u2026",
+        "text": "Worktrees\u2026",
         "icon": "gauge",
         "tone": "neutral",
-        "tooltip": "What each worktree costs",
-        "command": "worktreeLoad.refresh"
+        "tooltip": "What each worktree costs. Click for details",
+        "command": "worktreeLoad.show"
       }
     ],
     "settings": [
