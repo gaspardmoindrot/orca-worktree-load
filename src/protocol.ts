@@ -1,13 +1,11 @@
-import type { PanelPayload } from './model'
-
-// The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
+// The panel <-> worker contract. The worker's handlers are typed by it; src/panel.ts uses the
+// same names.
+import type { Snapshot } from './model'
 
 declare module 'orca' {
   interface PluginRequests {
     /** The last snapshot, or a fresh one if the worker has none yet. */
-    'load.get': { output: PanelPayload }
-    /** Samples now. */
-    'load.refresh': { output: PanelPayload }
+    'load.get': { output: Snapshot }
     /** Stops what these worktrees run (processes but their shells, and their containers). */
     'load.stop': { input: { keys: string[] }; output: { processes: number; containers: number; failed: string[] } }
     /** Shows the Orca worktree at `path`. */
@@ -15,6 +13,6 @@ declare module 'orca' {
   }
   interface PluginPanelEvents {
     /** Posted after every sample. */
-    'load.snapshot': PanelPayload
+    'load.snapshot': Snapshot
   }
 }

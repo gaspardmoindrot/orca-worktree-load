@@ -1,7 +1,7 @@
 // The right-sidebar panel (an html panel: Orca wraps this module in a page). The worker posts a
 // snapshot after every sample; this draws it with src/view.ts and handles clicks.
-import type { PanelPayload } from './model'
-import { buildView, CSS, render, stopText, type Confirm, type Row, type View } from './view'
+import type { Snapshot } from './model'
+import { buildView, CSS as PANEL_CSS, render, renderError, stopText, type Row, type View } from './view'
 
 declare const orca: {
   plugin: {
@@ -11,48 +11,41 @@ declare const orca: {
 }
 
 const style = document.createElement('style')
-style.textContent = CSS
+style.textContent = PANEL_CSS
 document.head.append(style)
 const root = document.createElement('main')
 document.body.append(root)
 
 let view: View | null = null
+let error: string | null = null
 const open = new Set<string>()
 let showGone = false
 let showIdle = false
-let confirm: Confirm | null = null
 let busy: string | null = null
 let notice: string | null = null
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
-let last = ''
+let pointerDown = false
+let drawn = ''
+
+const FOCUS_ATTRS = ['data-toggle', 'data-stop', 'data-stop-section', 'data-open', 'data-show-gone', 'data-show-idle']
 
 function draw(): void {
-  if (!view) {
-    root.innerHTML = '<p class="empty">Measuring…</p>'
-    return
-  }
-  const html = render(view, { open, showGone, showIdle, confirm, busy, notice })
-  // Only touch the page when something changed, so bars animate and hover stays put.
-  if (html !== last) {
-    root.innerHTML = html
-    last = html
-  }
+  // A redraw between mousedown and mouseup would swallow the click: wait for the mouseup.
+  if (pointerDown) return
+  const html = view ? render(view, { open, showGone, showIdle, busy, notice }) : error ? renderError(error) : '<p class="empty">Measuring…</p>'
+  if (html === drawn) return
+  // Keep keyboard focus on the same button across the redraw.
+  const focused = document.activeElement?.closest('button')
+  const attr = focused ? FOCUS_ATTRS.find((a) => focused.hasAttribute(a)) : undefined
+  const selector = focused && attr ? `[${attr}="${CSS.escape(focused.getAttribute(attr) ?? '')}"]` : null
+  root.innerHTML = html
+  drawn = html
+  if (selector) root.querySelector<HTMLElement>(selector)?.focus()
 }
 
 function receive(payload: unknown): void {
-  view = buildView(payload as PanelPayload)
+  view = buildView(payload as Snapshot)
   draw()
-}
-
-function allRows(v: View): Row[] {
-  return [...v.orca, ...v.other, ...v.gone]
-}
-
-/** Stops right away: no confirmation, the button says "Stopping…" until it is done. */
-function stopNow(id: string, rows: Row[]): void {
-  if (rows.length === 0) return
-  confirm = { id, keys: rows.map((r) => r.key), text: stopText(rows) }
-  void runStop()
 }
 
 function say(text: string): void {
@@ -64,46 +57,39 @@ function say(text: string): void {
   }, 6000)
 }
 
-async function runStop(): Promise<void> {
-  if (!confirm) return
-  const current = confirm
-  busy = current.id
+async function stop(id: string, rows: Row[]): Promise<void> {
+  if (rows.length === 0 || busy) return
+  const what = stopText(rows)
+  busy = id
   draw()
   try {
-    const result = (await orca.plugin.request('load.stop', { keys: current.keys })) as { processes: number; containers: number; failed: string[] }
-    const done = result.processes || result.containers ? `Stopped ${current.text}.` : 'Nothing left to stop.'
+    const result = (await orca.plugin.request('load.stop', { keys: rows.map((r) => r.key) })) as { processes: number; containers: number; failed: string[] }
+    const done = result.processes || result.containers ? `Stopped ${what}.` : 'Nothing left to stop.'
     say(result.failed.length ? `${done} Failed: ${result.failed[0]}` : done)
-  } catch (error) {
-    say(`Could not stop: ${error instanceof Error ? error.message : String(error)}`)
+  } catch (e) {
+    say(`Could not stop: ${e instanceof Error ? e.message : String(e)}`)
   } finally {
     busy = null
-    confirm = null
     draw()
   }
 }
 
 root.addEventListener('click', (event) => {
   const target = (event.target as HTMLElement).closest('button')
-  if (!target || !view || busy) return
+  if (!target || !view) return
   const attr = (name: string) => target.getAttribute(name)
   if (attr('data-toggle') !== null) {
     const key = attr('data-toggle')!
     if (open.has(key)) open.delete(key)
     else open.add(key)
   } else if (attr('data-stop') !== null) {
-    const row = allRows(view).find((r) => r.key === attr('data-stop'))
-    if (row) stopNow(`row:${row.key}`, [row])
+    const row = [...view.orca, ...view.other].find((r) => r.key === attr('data-stop'))
+    if (row) void stop(`row:${row.key}`, [row])
     return
   } else if (attr('data-stop-section') !== null) {
     const id = attr('data-stop-section')!
-    const list = id === 'orca' ? view.orca : id === 'other' ? view.other : view.gone
-    stopNow(`section:${id}`, list)
+    void stop(`section:${id}`, id === 'orca' ? view.orca : id === 'other' ? view.other : view.gone)
     return
-  } else if (target.hasAttribute('data-confirm')) {
-    void runStop()
-    return
-  } else if (target.hasAttribute('data-cancel')) {
-    confirm = null
   } else if (attr('data-open') !== null) {
     void orca.plugin.request('load.open', { path: attr('data-open') })
     return
@@ -115,13 +101,16 @@ root.addEventListener('click', (event) => {
   draw()
 })
 
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && confirm && !busy) {
-    confirm = null
-    draw()
-  }
+document.addEventListener('pointerdown', () => (pointerDown = true))
+document.addEventListener('pointerup', () => {
+  pointerDown = false
+  // Let the click land first, then catch up on what arrived meanwhile.
+  setTimeout(draw)
 })
 
 orca.plugin.on('load.snapshot', receive)
-void orca.plugin.request('load.get').then(receive)
+orca.plugin.request('load.get').then(receive, (e: unknown) => {
+  error = e instanceof Error ? e.message : String(e)
+  draw()
+})
 draw()

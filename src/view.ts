@@ -1,6 +1,6 @@
-// What the panel shows, as plain data and an HTML string. Pure, so tests can check it without a
-// browser; src/panel.ts only puts it on the page and handles clicks.
-import { type Kind, type OwnerLoad, type PanelPayload } from './model'
+// What the panel and the status bar show, as plain data and HTML strings. Pure, so tests check it
+// without a browser; src/panel.ts only puts it on the page and handles clicks.
+import { isRunning, totalOf, type Kind, type OwnerLoad, type Snapshot } from './model'
 
 export function bytes(n: number): string {
   if (n >= 10 * 2 ** 30) return `${Math.round(n / 2 ** 30)} GB`
@@ -9,22 +9,16 @@ export function bytes(n: number): string {
   return `${Math.max(0, Math.round(n / 2 ** 10))} KB`
 }
 
-/** CPU as a share of the whole Mac; `cpu` is in % of one core. */
-export function cpuShare(cpu: number, cores: number): number {
-  return cpu / Math.max(1, cores)
-}
-
 export function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 }
 
-const total = (w: OwnerLoad) => ({ cpu: w.cpu + w.docker.cpu, memory: w.memory + w.docker.memory })
-/** Running something besides open terminals: a worktree with only idle shells counts as idle. */
-const running = (w: OwnerLoad) => w.processes - (w.kinds.shell?.processes ?? 0) > 0 || w.docker.containers.length > 0
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
-/** Busy enough to mention: 3% of the whole Mac is a full core on most machines. */
+/** Busy enough to mention, in % of the whole Mac: a full core on a 12-core Mac is 8%. */
 const BUSY = 3
 
+/** What a Stop ends, counted the way a person thinks of it. */
 export type Stoppable = { agents: Record<string, number>; mcp: number; devServers: number; other: number; containers: number }
 
 export type Group = { label: string; count: number; bytes: number }
@@ -32,32 +26,34 @@ export type Group = { label: string; count: number; bytes: number }
 export type Row = {
   key: string
   name: string
-  /** "3 Claude · 45 MCP · Docker": what runs there, in a few words. */
+  /** "3 Claude · 9 MCP servers · 2 containers": what runs there, in a few words. */
   summary: string
   bytes: number
   /** "12% CPU" when the worktree is busy, else null. */
   cpu: string | null
   orca: boolean
   gone: boolean
-  where: string
+  /** Where the memory goes, heaviest first. */
   groups: Group[]
-  /** What Stop would stop, counted the way a person thinks of it. */
   stoppable: Stoppable
 }
+
+export type Segment = { id: 'worktrees' | 'docker' | 'orca' | 'other'; label: string; bytes: number }
 
 export type View = {
   used: number | null
   totalMemory: number
   pressure: 'normal' | 'warning' | 'critical'
-  segments: { id: 'worktrees' | 'docker' | 'orca' | 'other'; label: string; bytes: number }[]
+  segments: Segment[]
   orca: Row[]
   idle: string[]
   other: Row[]
   gone: Row[]
+  /** The heaviest row, which the row bars are scaled to. */
   max: number
 }
 
-const KIND_ORDER: [Kind, string][] = [
+const KIND_LABELS: [Kind, string][] = [
   ['dev-server', 'Dev servers'],
   ['test', 'Tests'],
   ['build', 'Builds'],
@@ -65,42 +61,48 @@ const KIND_ORDER: [Kind, string][] = [
   ['package-manager', 'Package managers'],
   ['browser', 'Browsers'],
   ['shell', 'Shells'],
+  ['shared', 'Shared tools (not stopped)'],
   ['other', 'Other']
 ]
 
 function summarize(w: OwnerLoad): string {
-  const parts: string[] = []
-  for (const [tool, n] of Object.entries(w.agents).sort((a, b) => b[1] - a[1])) parts.push(`${n} ${tool}`)
   const k = w.kinds
+  const parts = Object.entries(w.agents)
+    .sort((a, b) => b[1] - a[1])
+    .map(([tool, n]) => `${n} ${tool}`)
   if (k['dev-server']?.count) parts.push(k['dev-server'].count === 1 ? 'dev server' : `${k['dev-server'].count} dev servers`)
   if (k.test?.count) parts.push('tests')
   if (k.build?.count) parts.push('build')
-  if (k.mcp?.count) parts.push(k.mcp.count === 1 ? '1 MCP server' : `${k.mcp.count} MCP servers`)
-  if (w.docker.containers.length) parts.push(w.docker.containers.length === 1 ? '1 container' : `${w.docker.containers.length} containers`)
-  if (parts.length === 0 && w.processes) parts.push(w.processes === 1 ? '1 process' : `${w.processes} processes`)
+  if (k.mcp?.count) parts.push(plural(k.mcp.count, 'MCP server'))
+  if (w.docker.containers.length) parts.push(plural(w.docker.containers.length, 'container'))
+  if (parts.length === 0 && w.processes) parts.push(plural(w.processes, 'process', 'processes'))
   return parts.join(' · ')
 }
 
-function toRow(w: OwnerLoad, cores: number): Row {
-  const t = total(w)
-  const share = cpuShare(t.cpu, cores)
+function groupsOf(w: OwnerLoad): Group[] {
   const groups: Group[] = []
   const agents = w.kinds.agent
   if (agents?.count) {
     const tools = Object.keys(w.agents)
     groups.push({ label: tools.length === 1 ? `${tools[0]} sessions` : 'Agent sessions', count: agents.count, bytes: agents.memory })
   }
-  for (const [kind, label] of KIND_ORDER) {
+  for (const [kind, label] of KIND_LABELS) {
     const g = w.kinds[kind]
     if (!g?.count) continue
     if (kind === 'mcp') {
-      // "MCP: playwright ×9, github": which servers, not how many processes they hold.
-      const entries = Object.entries(w.mcp).sort((a, b) => b[1] - a[1])
-      const names = entries.length === 1 ? entries[0][0] : entries.map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ')
+      // Which servers, not how many processes they hold: "MCP · Playwright", "MCP · Github, Linear".
+      const servers = Object.entries(w.mcp).sort((a, b) => b[1] - a[1])
+      const names = servers.length === 1 ? servers[0][0] : servers.map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(', ')
       groups.push({ label: `MCP · ${names}`, count: g.count, bytes: g.memory })
     } else groups.push({ label, count: g.count, bytes: g.memory })
   }
   if (w.docker.containers.length) groups.push({ label: 'Docker', count: w.docker.containers.length, bytes: w.docker.memory })
+  return groups.sort((a, b) => b.bytes - a.bytes)
+}
+
+function toRow(w: OwnerLoad, cores: number): Row {
+  const t = totalOf(w)
+  const share = t.cpu / Math.max(1, cores)
   return {
     key: w.key,
     name: w.name,
@@ -109,8 +111,7 @@ function toRow(w: OwnerLoad, cores: number): Row {
     cpu: share >= BUSY ? `${Math.round(share)}% CPU` : null,
     orca: w.orca,
     gone: w.gone,
-    where: [w.repo, w.branch].filter(Boolean).join(' · '),
-    groups: groups.sort((a, b) => b.bytes - a.bytes),
+    groups: groupsOf(w),
     stoppable: {
       agents: { ...w.agents },
       mcp: w.kinds.mcp?.count ?? 0,
@@ -121,109 +122,109 @@ function toRow(w: OwnerLoad, cores: number): Row {
   }
 }
 
-export function buildView(p: PanelPayload): View {
-  const cores = p.machine.cores
-  const rows = p.worktrees.filter(running).map((w) => toRow(w, cores))
-  // Two rows with the same name (two checkouts of one repo): add each one's folder to tell them apart.
+export function buildView(s: Snapshot): View {
+  const rows = s.worktrees.filter(isRunning).map((w) => toRow(w, s.machine.cores))
+  // Two rows with the same name (two checkouts of one repo): add each one's folder.
   const seen = new Map<string, number>()
   for (const r of rows) seen.set(r.name, (seen.get(r.name) ?? 0) + 1)
   for (const r of rows) {
-    if ((seen.get(r.name) ?? 0) > 1) {
-      const folder = r.key.split('/').filter(Boolean).at(-1) ?? r.key
-      if (folder !== r.name) r.summary = [r.summary, folder].filter(Boolean).join(' · ')
-    }
+    const folder = r.key.split('/').filter(Boolean).at(-1) ?? r.key
+    if ((seen.get(r.name) ?? 0) > 1 && folder !== r.name) r.summary = [r.summary, folder].filter(Boolean).join(' · ')
   }
   const byBytes = (a: Row, b: Row) => b.bytes - a.bytes
-  const inWorktrees = rows.reduce((n, r) => n + r.bytes, 0)
-  const used = p.machine.memoryUsed
-  const docker = p.dockerVm.memory
-  const orcaApp = p.orcaApp.memory
-  const rest = used !== null ? Math.max(0, used - inWorktrees - docker - orcaApp) : p.other.memory
+  const sum = (list: Row[]) => list.reduce((n, r) => n + r.bytes, 0)
+  const gone = rows.filter((r) => r.gone).sort(byBytes)
+  const live = rows.filter((r) => !r.gone)
+  const inWorktrees = sum(live)
+  const docker = s.dockerVm.memory + sum(gone)
+  const used = s.machine.memoryUsed
+  const rest = used !== null ? Math.max(0, used - inWorktrees - docker - s.orcaApp.memory) : s.other.memory
   return {
     used,
-    totalMemory: p.machine.memoryTotal,
-    pressure: p.machine.pressure,
+    totalMemory: s.machine.memoryTotal,
+    pressure: s.machine.pressure,
     segments: [
       { id: 'worktrees', label: 'Worktrees', bytes: inWorktrees },
       { id: 'docker', label: 'Docker', bytes: docker },
-      { id: 'orca', label: 'Orca', bytes: orcaApp },
+      { id: 'orca', label: 'Orca', bytes: s.orcaApp.memory },
       { id: 'other', label: 'Other apps', bytes: rest }
     ],
-    orca: rows.filter((r) => r.orca).sort(byBytes),
-    idle: p.worktrees.filter((w) => w.orca && !running(w)).map((w) => w.name).sort(),
-    other: rows.filter((r) => !r.orca && !r.gone).sort(byBytes),
-    gone: rows.filter((r) => r.gone).sort(byBytes),
+    orca: live.filter((r) => r.orca).sort(byBytes),
+    idle: s.worktrees.filter((w) => w.orca && !isRunning(w)).map((w) => w.name).sort(),
+    other: live.filter((r) => !r.orca).sort(byBytes),
+    gone,
     max: Math.max(1, ...rows.map((r) => r.bytes))
   }
-}
-
-// ---------------------------------------------------------------------------------------------
-// HTML, styled after Orca's own sidebar panels: grey, 11-12px, actions shown on hover, red only
-// on the button that confirms a stop.
-
-const pct = (part: number, whole: number) => `${Math.max(0, Math.min(100, (100 * part) / Math.max(1, whole))).toFixed(1)}%`
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
-
-const ICON = {
-  chevron: '<path d="m9 18 6-6-6-6"/>',
-  stop: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
-  open: '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>'
-}
-const icon = (name: keyof typeof ICON) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`
-
-/** A stop waiting for its second click: which button asked, what it stops, how to say it. */
-export type Confirm = { id: string; keys: string[]; text: string }
-export type UiState = {
-  open: ReadonlySet<string>
-  showGone: boolean
-  showIdle: boolean
-  confirm: Confirm | null
-  busy: string | null
-  notice: string | null
 }
 
 /** "3 Claude sessions, 9 MCP servers and 2 containers": what a stop of these rows ends. */
 export function stopText(rows: readonly Row[]): string {
   const agents: Record<string, number> = {}
-  let mcp = 0
-  let dev = 0
-  let other = 0
-  let containers = 0
+  const n = { mcp: 0, devServers: 0, other: 0, containers: 0 }
   for (const r of rows) {
-    for (const [tool, n] of Object.entries(r.stoppable.agents)) agents[tool] = (agents[tool] ?? 0) + n
-    mcp += r.stoppable.mcp
-    dev += r.stoppable.devServers
-    other += r.stoppable.other
-    containers += r.stoppable.containers
+    for (const [tool, count] of Object.entries(r.stoppable.agents)) agents[tool] = (agents[tool] ?? 0) + count
+    n.mcp += r.stoppable.mcp
+    n.devServers += r.stoppable.devServers
+    n.other += r.stoppable.other
+    n.containers += r.stoppable.containers
   }
   const parts = [
-    ...Object.entries(agents).map(([tool, n]) => plural(n, `${tool} session`)),
-    mcp ? plural(mcp, 'MCP server') : '',
-    dev ? plural(dev, 'dev server') : '',
-    other ? plural(other, 'other process', 'other processes') : '',
-    containers ? plural(containers, 'container') : ''
+    ...Object.entries(agents).map(([tool, count]) => plural(count, `${tool} session`)),
+    n.mcp ? plural(n.mcp, 'MCP server') : '',
+    n.devServers ? plural(n.devServers, 'dev server') : '',
+    n.other ? plural(n.other, 'other process', 'other processes') : '',
+    n.containers ? plural(n.containers, 'container') : ''
   ].filter(Boolean)
   if (parts.length === 0) return 'nothing'
   return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
 }
 
-/** A plain "Stop" button; it stops on click, and says "Stopping…" until the worker is done. */
-function stopButton(attr: string, id: string, ui: UiState, label = 'Stop', title = label): string {
-  const busy = ui.busy === id
-  const inner = busy ? `<span class="spin" aria-label="Stopping"></span>` : esc(label)
-  return `<button class="btn stop${busy ? ' busy' : ''}" ${attr} title="${esc(busy ? 'Stopping…' : title)}" ${ui.busy ? 'disabled' : ''}>${inner}</button>`
+/** The status bar item: memory of the running worktrees, coloured by macOS memory pressure. */
+export function statusBar(v: View, error?: string): { text: string; tone: 'neutral' | 'warning' | 'danger'; tooltip: string } {
+  if (error && v.used === null) return { text: 'Worktrees: ?', tone: 'warning', tooltip: error }
+  const live = [...v.orca, ...v.other]
+  const heaviest = [...live].sort((a, b) => b.bytes - a.bytes)[0]
+  // Orca shows the tooltip on one line: keep it short.
+  const tooltip = [
+    heaviest ? `Heaviest: ${heaviest.name} ${bytes(heaviest.bytes)}` : null,
+    v.used !== null ? `Mac: ${bytes(v.used)} of ${bytes(v.totalMemory)} used` : null,
+    'Click for details'
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return {
+    text: `${bytes(live.reduce((n, r) => n + r.bytes, 0))} in ${plural(live.length, 'worktree')}`,
+    tone: v.pressure === 'critical' ? 'danger' : v.pressure === 'warning' ? 'warning' : 'neutral',
+    tooltip
+  }
 }
 
-function confirmStrip(id: string, ui: UiState): string {
-  if (ui.confirm?.id !== id) return ''
+// ---------------------------------------------------------------------------------------------
+// HTML, styled after Orca's own sidebar panels: grey, 11-12px, actions shown on hover, red only
+// when a Stop button is hovered.
+
+const pct = (part: number, whole: number) => `${Math.max(0, Math.min(100, (100 * part) / Math.max(1, whole))).toFixed(1)}%`
+
+const ICONS = {
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  open: '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>'
+}
+const icon = (name: keyof typeof ICONS) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`
+
+export type UiState = {
+  open: ReadonlySet<string>
+  showGone: boolean
+  showIdle: boolean
+  /** The id of the Stop button whose stop is running. */
+  busy: string | null
+  notice: string | null
+}
+
+/** A "Stop" button: it stops on click and shows a spinner until the worker is done. */
+function stopButton(attr: string, id: string, ui: UiState, label: string, title: string): string {
   const busy = ui.busy === id
-  return `<div class="confirm" role="alertdialog" aria-label="Confirm stop">
-    <span>${esc(ui.confirm.text)}</span>
-    <span class="confirm-actions">
-      <button class="btn" data-cancel ${busy ? 'disabled' : ''}>Cancel</button>
-      <button class="btn destructive" data-confirm ${busy ? 'disabled' : ''}>${busy ? 'Stopping…' : 'Stop'}</button>
-    </span>
-  </div>`
+  const inner = busy ? '<span class="spin" aria-label="Stopping"></span>' : esc(label)
+  return `<button class="btn stop${busy ? ' busy' : ''}" ${attr} title="${esc(busy ? 'Stopping…' : title)}" ${ui.busy ? 'disabled' : ''}>${inner}</button>`
 }
 
 function detail(r: Row): string {
@@ -235,10 +236,8 @@ function detail(r: Row): string {
       </div>`
     )
     .join('')
-  return `<div class="detail">
-    <div class="groups">${groups}</div>
-    ${r.orca ? `<div class="detail-actions"><button class="btn" data-open="${esc(r.key)}">${icon('open')}Open in Orca</button></div>` : ''}
-  </div>`
+  const open = r.orca ? `<div class="detail-actions"><button class="btn" data-open="${esc(r.key)}">${icon('open')}Open in Orca</button></div>` : ''
+  return `<div class="detail"><div class="groups">${groups}</div>${open}</div>`
 }
 
 function row(r: Row, max: number, ui: UiState): string {
@@ -261,16 +260,40 @@ function row(r: Row, max: number, ui: UiState): string {
 
 function section(id: string, title: string, rows: Row[], max: number, ui: UiState, extra = ''): string {
   if (rows.length === 0 && !extra) return ''
-  const sum = rows.reduce((n, r) => n + r.bytes, 0)
+  const total = rows.reduce((n, r) => n + r.bytes, 0)
+  const stopAll = rows.length > 1 ? stopButton(`data-stop-section="${id}"`, `section:${id}`, ui, 'Stop all', `Stop all ${title.toLowerCase()}`) : ''
   return `<section>
     <div class="sec-head">
       <span class="sec-title">${esc(title)}</span>
-      <span class="sec-val num">${rows.length ? bytes(sum) : ''}</span>
-      <span class="sec-act">${rows.length > 1 ? stopButton(`data-stop-section="${id}"`, `section:${id}`, ui, 'Stop all', `Stop all ${title.toLowerCase()}`) : ''}</span>
+      <span class="sec-val num">${rows.length ? bytes(total) : ''}</span>
+      <span class="sec-act">${stopAll}</span>
     </div>
     ${rows.map((r) => row(r, max, ui)).join('')}
     ${extra}
   </section>`
+}
+
+function goneBanner(v: View, ui: UiState): string {
+  if (v.gone.length === 0) return ''
+  const total = v.gone.reduce((n, r) => n + r.bytes, 0)
+  const list = ui.showGone
+    ? `<div class="gone-list">${v.gone.map((r) => `<div class="gone"><span class="name">${esc(r.name)}</span><span class="num">${bytes(r.bytes)}</span></div>`).join('')}</div>`
+    : ''
+  return `<div class="banner">
+    <div class="banner-head">
+      <span class="warn-dot"></span>
+      <button class="banner-title" data-show-gone aria-expanded="${ui.showGone}">${plural(v.gone.length, 'Docker stack')} left running · <span class="num">${bytes(total)}</span></button>
+      ${stopButton('data-stop-section="gone"', 'section:gone', ui, 'Stop all', 'docker compose down each stack')}
+    </div>
+    <div class="banner-sub">Their worktrees were deleted.</div>
+    ${list}
+  </div>`
+}
+
+function idleLink(v: View, ui: UiState): string {
+  if (v.idle.length === 0) return ''
+  const list = ui.showIdle ? `<div class="idle-list">${v.idle.map(esc).join(' · ')}</div>` : ''
+  return `<button class="idle" data-show-idle aria-expanded="${ui.showIdle}">${ui.showIdle ? 'Hide' : plural(v.idle.length, 'idle worktree')}</button>${list}`
 }
 
 export function render(v: View, ui: UiState): string {
@@ -278,37 +301,24 @@ export function render(v: View, ui: UiState): string {
   const shown = v.segments.filter((s) => s.bytes > 0)
   const bar = shown.map((s) => `<i class="seg ${s.id}" style="width:${pct(s.bytes, v.totalMemory)}"></i>`).join('')
   const legend = shown.map((s) => `<span class="key"><i class="sw ${s.id}"></i>${esc(s.label)} <b class="num">${bytes(s.bytes)}</b></span>`).join('')
-  const goneBytes = v.gone.reduce((n, r) => n + r.bytes, 0)
-  const gone = v.gone.length
-    ? `<div class="banner">
-        <div class="banner-head">
-          <span class="warn-dot"></span>
-          <button class="banner-title" data-show-gone aria-expanded="${ui.showGone}">${plural(v.gone.length, 'Docker stack')} left running · <span class="num">${bytes(goneBytes)}</span></button>
-          ${stopButton('data-stop-section="gone"', 'section:gone', ui, 'Stop all', 'docker compose down each stack')}
-        </div>
-        <div class="banner-sub">Their worktrees were deleted.</div>
-        ${ui.showGone ? `<div class="gone-list">${v.gone.map((r) => `<div class="gone"><span class="name">${esc(r.name)}</span><span class="num">${bytes(r.bytes)}</span></div>`).join('')}</div>` : ''}
-      </div>`
-    : ''
-  const idle = v.idle.length
-    ? `<button class="idle" data-show-idle aria-expanded="${ui.showIdle}">${ui.showIdle ? 'Hide' : plural(v.idle.length, 'idle worktree')}</button>${
-        ui.showIdle ? `<div class="idle-list">${v.idle.map(esc).join(' · ')}</div>` : ''
-      }`
-    : ''
+  const pressure = v.pressure === 'normal' ? '' : `<span class="pressure ${v.pressure}">${v.pressure === 'critical' ? 'Critical' : 'High'} pressure</span>`
   return `<header>
       <div class="top">
-        <span class="label">Memory</span>
-        ${v.pressure !== 'normal' ? `<span class="pressure ${v.pressure}">${v.pressure === 'critical' ? 'Critical' : 'High'} pressure</span>` : ''}
+        <span class="label">Memory</span>${pressure}
         <span class="used"><b class="num">${bytes(used)}</b> / ${bytes(v.totalMemory)}</span>
       </div>
       <div class="stack">${bar}</div>
       <div class="legend">${legend}</div>
     </header>
     ${ui.notice ? `<div class="notice">${esc(ui.notice)}</div>` : ''}
-    ${gone}
-    ${section('orca', 'Orca worktrees', v.orca, v.max, ui, idle)}
+    ${goneBanner(v, ui)}
+    ${section('orca', 'Orca worktrees', v.orca, v.max, ui, idleLink(v, ui))}
     ${section('other', 'Other checkouts', v.other, v.max, ui)}
     ${v.orca.length + v.other.length === 0 ? '<p class="empty">No worktree is running anything.</p>' : ''}`
+}
+
+export function renderError(error: string): string {
+  return `<p class="empty">Could not read the processes.<br><span class="num">${esc(error)}</span></p>`
 }
 
 export const CSS = `
@@ -330,7 +340,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cu
 button:focus-visible{outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--orca-ring,#737373) 60%,transparent);border-radius:4px}
 svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
 
-header{padding:12px 12px 12px;border-bottom:1px solid var(--line)}
+header{padding:12px;border-bottom:1px solid var(--line)}
 .top{display:flex;align-items:baseline;gap:8px}
 .label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .used{margin-left:auto;color:var(--muted)}
@@ -367,15 +377,13 @@ section{padding:0 4px}
 
 .btn{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 7px;border-radius:5px;font-size:11px;font-weight:500;white-space:nowrap;color:var(--fg);transition:background-color .15s,color .15s}
 .btn:hover{background:var(--accent)}
-.btn.quiet{color:var(--muted)}
-.btn.quiet:hover{color:var(--fg)}
-.btn.destructive{background:color-mix(in srgb,var(--danger) 80%,var(--bg));color:#fff}
-.btn.destructive:hover{background:var(--danger)}
 .btn:disabled{opacity:.5;pointer-events:none}
-.ibtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;color:var(--muted);transition:background-color .15s,color .15s}
-.ibtn svg{width:11px;height:11px}
-.ibtn:hover{background:var(--accent);color:var(--fg)}
-.ibtn.danger:hover{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}
+.btn.stop{color:var(--muted)}
+.btn.stop:hover{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}
+.btn.stop:disabled{opacity:1}
+.btn.stop.busy{min-width:34px;justify-content:center}
+.spin{width:11px;height:11px;border:1.5px solid color-mix(in srgb,var(--muted) 35%,transparent);border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 .row{border-radius:6px}
 .row+.row{margin-top:1px}
@@ -392,19 +400,7 @@ section{padding:0 4px}
 .bar{grid-column:2/4;height:2px;margin-top:5px;border-radius:999px;background:var(--track);overflow:hidden}
 .bar i{display:block;height:100%;min-width:2px;border-radius:999px;background:var(--fill);transition:width .4s}
 .actions{position:absolute;right:6px;top:4px;opacity:0;transition:opacity .15s}
-.actions.busy{opacity:1}
-.btn.stop{color:var(--muted)}
-.btn.stop:hover{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}
-.btn.stop:disabled{opacity:1}
-.btn.stop.busy{min-width:34px;justify-content:center}
-.spin{width:11px;height:11px;border:1.5px solid color-mix(in srgb,var(--muted) 35%,transparent);border-top-color:var(--muted);border-radius:50%;animation:spin .7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.head:hover .actions,.head:focus-within .actions,.open .actions{opacity:1}
-
-.confirm{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin:2px 8px 6px 24px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:11px;background:var(--bg)}
-.banner .confirm{margin-left:12px}
-.confirm>span:first-child{flex:1 1 160px;color:var(--muted)}
-.confirm-actions{display:flex;gap:4px;margin-left:auto}
+.head:hover .actions,.head:focus-within .actions,.open .actions,.actions.busy{opacity:1}
 
 .detail{padding:0 36px 8px 24px}
 .groups{display:grid;gap:5px}
@@ -420,5 +416,5 @@ section{padding:0 4px}
 .idle{display:block;margin:6px 8px 0 26px;font-size:11px;color:var(--muted)}
 .idle:hover{color:var(--fg)}
 .idle-list{margin:3px 8px 0 26px;font-size:11px;color:var(--muted)}
-.empty{color:var(--muted);text-align:center;margin-top:24px}
+.empty{color:var(--muted);text-align:center;margin:24px 12px}
 `

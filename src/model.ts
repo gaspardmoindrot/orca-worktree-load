@@ -1,21 +1,17 @@
 // Pure logic, no I/O: parse what ps, top, lsof and docker print, decide which worktree owns each
-// process, and roll it up. The worker feeds it; the tests call it directly.
+// process, and add it up per worktree. The sampler feeds it; the tests call it directly.
 
 export type Proc = { pid: number; ppid: number; cpuSeconds: number; rss: number; command: string }
 
 /** A worktree as Orca's `workspace.list` gives it. */
-export type OrcaWorktree = {
-  id: string
-  name: string
-  project: string | null
-  path: string
-  branch: string | null
-  state: string | null
-}
+export type OrcaWorktree = { id: string; name: string; project: string | null; path: string; branch: string | null }
 
-export type Kind = 'agent' | 'mcp' | 'dev-server' | 'test' | 'build' | 'package-manager' | 'browser' | 'shell' | 'other'
+/** `shared`: tools that serve more than one worktree (tmux, build daemons, apps). Stop leaves
+ *  them and shells alone. */
+export type Kind = 'agent' | 'mcp' | 'dev-server' | 'test' | 'build' | 'package-manager' | 'browser' | 'shell' | 'shared' | 'other'
 
-export type OwnerKey = string // a worktree path, or one of the buckets below
+/** A worktree path, `docker:<project>` for a stack outside any worktree, or one of the buckets. */
+export type OwnerKey = string
 export const ORCA_APP = '@orca'
 export const DOCKER_VM = '@docker'
 export const OTHER = '@other'
@@ -23,23 +19,19 @@ export const OTHER = '@other'
 // ---------------------------------------------------------------------------------------------
 // Parsers
 
-/** `ps -Ao pid=,ppid=,time=,rss=,command=`; time is [[dd-]hh:]mm:ss.cc, rss in KB. */
+/** `ps -Ao pid=,ppid=,time=,rss=,command=`: time is [[dd-]hh:]mm:ss.cc, rss in KB. */
 export function parsePs(out: string): Proc[] {
   const procs: Proc[] = []
   for (const line of out.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(.*)$/.exec(line)
-    if (!m) continue
-    procs.push({ pid: Number(m[1]), ppid: Number(m[2]), cpuSeconds: parseCpuTime(m[3]), rss: Number(m[4]) * 1024, command: m[5] })
+    if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), cpuSeconds: parseCpuTime(m[3]), rss: Number(m[4]) * 1024, command: m[5] })
   }
   return procs
 }
 
 export function parseCpuTime(t: string): number {
   const [days, rest] = t.includes('-') ? t.split('-') : ['0', t]
-  const parts = rest.split(':').map(Number)
-  let seconds = 0
-  for (const p of parts) seconds = seconds * 60 + p
-  return Number(days) * 86400 + seconds
+  return Number(days) * 86400 + rest.split(':').map(Number).reduce((total, part) => total * 60 + part, 0)
 }
 
 /** `top -l 1 -stats pid,mem`: MEM is the footprint Activity Monitor shows ("19M", "8081K", "1.2G+"). */
@@ -58,9 +50,8 @@ export function parseTop(out: string): { footprints: Map<number, number>; physUs
 export function parseSize(s: string): number {
   const m = /^([\d.]+)\s*([BKMGT]i?B?)?$/i.exec(s.trim())
   if (!m) return 0
-  const unit = (m[2] ?? 'B')[0].toUpperCase()
-  const mult = { B: 1, K: 2 ** 10, M: 2 ** 20, G: 2 ** 30, T: 2 ** 40 }[unit] ?? 1
-  return Math.round(Number(m[1]) * mult)
+  const unit = (m[2] ?? 'B')[0].toUpperCase() as 'B' | 'K' | 'M' | 'G' | 'T'
+  return Math.round(Number(m[1]) * { B: 1, K: 2 ** 10, M: 2 ** 20, G: 2 ** 30, T: 2 ** 40 }[unit])
 }
 
 /** `lsof -a -d cwd -Fn ...`: lines "p<pid>", "fcwd", "n<path>". */
@@ -80,20 +71,19 @@ export type Container = { id: string; name: string; project: string; workingDir:
 export function parseDockerPs(out: string): Omit<Container, 'cpu' | 'memory'>[] {
   return out
     .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => {
-      const [id, workingDir, project, name] = l.split('\t')
-      return { id, workingDir: workingDir ?? '', project: project ?? '', name: name ?? id }
+    .filter((line) => line.trim())
+    .map((line) => {
+      const [id, workingDir, project, name] = line.split('\t')
+      return { id, workingDir: workingDir ?? '', project: project ?? '', name: name || id }
     })
 }
 
 /** `docker stats --no-stream --format '{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}'`. */
 export function parseDockerStats(out: string): Map<string, { cpu: number; memory: number }> {
   const stats = new Map<string, { cpu: number; memory: number }>()
-  for (const l of out.split('\n')) {
-    const [id, cpu, mem] = l.split('\t')
-    if (!id || !mem) continue
-    stats.set(id, { cpu: Number.parseFloat(cpu) || 0, memory: parseSize(mem.split('/')[0]) })
+  for (const line of out.split('\n')) {
+    const [id, cpu, mem] = line.split('\t')
+    if (id && mem) stats.set(id, { cpu: Number.parseFloat(cpu) || 0, memory: parseSize(mem.split('/')[0]) })
   }
   return stats
 }
@@ -101,23 +91,24 @@ export function parseDockerStats(out: string): Map<string, { cpu: number; memory
 // ---------------------------------------------------------------------------------------------
 // Classification
 
+// Order matters: `claude mcp serve` is an agent, `node …/mcp-server-github` an MCP server.
 const KINDS: [Kind, RegExp][] = [
-  ['mcp', /\bmcp\b|mcp-server|server-[a-z-]+\.js|\bmcp\.m?[jt]s\b/i],
+  ['shared', /\.app\/Contents\/|(^|\/)(tmux|screen|ssh-agent|gpg-agent|watchman)(\s|$)|GradleDaemon|turbo(d|\s+daemon)|nx\/.*daemon/i],
   ['agent', /(^|\/)(claude|codex|gemini|opencode|amp|cursor-agent|aider)(\s|$)|@anthropic-ai\/claude-code|claude-code\/cli|@openai\/codex/i],
+  ['mcp', /\bmcp\b|mcp-server|server-[a-z-]+\.js|\bmcp\.m?[jt]s\b/i],
   ['test', /\b(vitest|jest|playwright|mocha|pytest|cypress)\b|\bnode --test\b|\.test\.[jt]sx?\b/],
   ['dev-server', /\b(vite|next(-server)?|nest start|nodemon|webpack(-dev-server)?|astro dev|remix dev|nuxt|storybook|uvicorn|rails s|tsx watch)\b|\b(dev|serve|start:dev)\s*$/],
   ['build', /\b(tsc|turbo|esbuild|rollup|swc|nest build|webpack|biome|eslint|oxlint|prettier|cargo|go build|gradle|xcodebuild|swift-build)\b/],
   ['package-manager', /\b(npm|pnpm|yarn|bun|npx|pip|uv)\b/],
-  ['browser', /chrom(e|ium)|headless|Google Chrome for Testing|playwright.*browser/i],
+  ['browser', /chrom(e|ium)|headless|Google Chrome for Testing/i],
   ['shell', /(^|\/)-?(zsh|bash|fish|sh)(\s|$)/]
 ]
 
 export function classify(command: string): Kind {
-  for (const [kind, re] of KINDS) if (re.test(command)) return kind
-  return 'other'
+  return KINDS.find(([, re]) => re.test(command))?.[0] ?? 'other'
 }
 
-/** "@playwright/mcp", "scripts/playwright/mcp.mts", "mcp-server-github" → "playwright", "github". */
+/** "@playwright/mcp", "scripts/playwright/mcp.mts", "mcp-server-github" → "Playwright", "Github". */
 export function mcpName(command: string): string {
   const m =
     /@([\w.-]+)[/+]mcp\b/.exec(command) ??
@@ -128,25 +119,12 @@ export function mcpName(command: string): string {
   return name ? name[0].toUpperCase() + name.slice(1) : 'MCP'
 }
 
+const AGENT_TOOLS = [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini'], ['opencode', 'OpenCode'], ['cursor-agent', 'Cursor'], ['aider', 'Aider'], ['amp', 'Amp']] as const
+
 /** Which coding agent a process is, for "3 Claude · 1 Codex". */
 export function agentTool(command: string): string {
   const c = command.toLowerCase()
-  for (const [needle, label] of [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini'], ['opencode', 'OpenCode'], ['cursor-agent', 'Cursor'], ['aider', 'Aider'], ['amp', 'Amp']] as const) {
-    if (c.includes(needle)) return label
-  }
-  return 'Agent'
-}
-
-/** A short process name: the binary, or the script for node/python/bun. */
-export function shortName(command: string): string {
-  const parts = command.split(/\s+/)
-  const base = (s: string) => s.split('/').pop() ?? s
-  const bin = base(parts[0])
-  if (/^(node|bun|python3?|deno)$/.test(bin)) {
-    const script = parts.slice(1).find((p) => !p.startsWith('-'))
-    if (script) return `${bin} ${base(script)}`
-  }
-  return bin.length > 40 ? `${bin.slice(0, 39)}…` : bin
+  return AGENT_TOOLS.find(([needle]) => c.includes(needle))?.[1] ?? 'Agent'
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -165,18 +143,13 @@ export const isDockerVmProcess = (command: string) => /com\.apple\.Virtualizatio
 /**
  * Who owns each process, in this order:
  * 1. its working directory lies in a worktree (an Orca one first, any git checkout otherwise);
- * 2. it is Docker Desktop's VM or its helpers;
+ * 2. it is Docker Desktop or its VM;
  * 3. it inherits its parent's owner (a dev server started by a shell in the worktree, an MCP
  *    server started by an agent);
- * 4. it is under Orca's app process (Orca itself and its helpers);
+ * 4. it is Orca's app process, or under it;
  * 5. anything else.
  */
-export function attribute(
-  procs: readonly Proc[],
-  cwds: ReadonlyMap<number, string>,
-  resolver: Resolver,
-  home: string
-): Map<number, OwnerKey> {
+export function attribute(procs: readonly Proc[], cwds: ReadonlyMap<number, string>, resolver: Resolver, home: string): Map<number, OwnerKey> {
   const byPid = new Map(procs.map((p) => [p.pid, p]))
   const owners = new Map<number, OwnerKey>()
   const orcaPid = procs.find((p) => /\/Orca\.app\/Contents\/MacOS\/Orca$/.test(p.command))?.pid
@@ -184,10 +157,8 @@ export function attribute(
 
   const own = (p: Proc): OwnerKey | null => {
     const cwd = cwds.get(p.pid)
-    if (cwd && cwd !== '/' && cwd !== home) {
-      const root = resolver.rootFor(cwd)
-      if (root) return root
-    }
+    const root = cwd && cwd !== '/' && cwd !== home ? resolver.rootFor(cwd) : null
+    if (root) return root
     if (/\/Docker\.app\/|com\.docker\./.test(p.command) || (dockerRunning && isDockerVmProcess(p.command))) return DOCKER_VM
     if (p.pid === orcaPid) return ORCA_APP
     return null
@@ -198,8 +169,7 @@ export function attribute(
     if (known) return known
     const p = byPid.get(pid)
     if (!p || depth > 64) return OTHER
-    const direct = own(p)
-    const owner = direct ?? (p.ppid > 1 ? resolve(p.ppid, depth + 1) : OTHER)
+    const owner = own(p) ?? (p.ppid > 1 ? resolve(p.ppid, depth + 1) : OTHER)
     owners.set(pid, owner)
     return owner
   }
@@ -208,48 +178,48 @@ export function attribute(
   return owners
 }
 
+/**
+ * Where a Docker container is counted: the worktree around its compose folder, or a
+ * `docker:<project>` row of its own, `gone` when that folder no longer exists. A container
+ * started without compose has no folder and is left in the Docker row.
+ */
+export function containerOwner(c: Pick<Container, 'workingDir' | 'project'>, resolver: Resolver): { key: OwnerKey; gone: boolean } | null {
+  if (!c.workingDir) return null
+  const root = resolver.rootFor(c.workingDir)
+  if (root) return { key: root, gone: false }
+  return { key: `docker:${c.project || c.workingDir}`, gone: !resolver.exists(c.workingDir) }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Roll-up
 
-export type ProcLoad = { pid: number; name: string; kind: Kind; cpu: number; memory: number }
+export type Usage = { cpu: number; memory: number }
 
 export type OwnerLoad = {
   key: OwnerKey
   name: string
   repo: string | null
   branch: string | null
-  /** Known to Orca (in its sidebar), or a git checkout found on disk. */
+  /** In Orca's sidebar, as opposed to a git checkout found on disk. */
   orca: boolean
   /** A Docker stack still running for a folder that no longer exists. */
   gone: boolean
-  agentState: string | null
+  /** CPU in % of one core, memory in bytes, of its processes (Docker is in `docker`). */
   cpu: number
   memory: number
   processes: number
   /** `count` is how many separate things run (a process whose parent is not of the same kind),
    *  `processes` how many processes they hold: one Playwright MCP server is about 5 processes. */
-  kinds: Partial<Record<Kind, { cpu: number; memory: number; count: number; processes: number }>>
+  kinds: Partial<Record<Kind, Usage & { count: number; processes: number }>>
   /** Agent sessions by tool: { Claude: 3, Codex: 1 }. */
   agents: Record<string, number>
-  /** MCP servers by name: { playwright: 9, github: 1 }. */
+  /** MCP servers by name: { Playwright: 9, Github: 1 }. */
   mcp: Record<string, number>
-  top: ProcLoad[]
-  /** The worktree's share of the Docker VM, split by its containers' memory and CPU. */
-  docker: { cpu: number; memory: number; containers: { name: string; cpu: number; memory: number }[] }
+  /** Its containers, and its share of the Docker VM. */
+  docker: Usage & { containers: (Usage & { name: string })[] }
 }
 
-export type Machine = {
-  memoryTotal: number
-  memoryUsed: number | null
-  pressure: 'normal' | 'warning' | 'critical'
-  cores: number
-  load1: number
-  /** Sum of every process we can read, in % of one core. */
-  cpu: number
-}
-
-/** What the panel gets: the snapshot and, per worktree, the last hour (memory in MB, CPU in %). */
-export type PanelPayload = Snapshot & { trends: Record<string, { memoryMb: number[]; cpu: number[] }> }
+export type Machine = { memoryTotal: number; memoryUsed: number | null; pressure: 'normal' | 'warning' | 'critical'; cores: number }
 
 export type Snapshot = {
   at: number
@@ -261,8 +231,17 @@ export type Snapshot = {
   error?: string
 }
 
+export const totalOf = (o: OwnerLoad): Usage => ({ cpu: o.cpu + o.docker.cpu, memory: o.memory + o.docker.memory })
+
+/** Kinds Stop never ends. */
+export const KEPT_ON_STOP: readonly Kind[] = ['shell', 'shared']
+
+/** Running something Stop would end: a worktree with only shells and shared tools counts as idle. */
+export const isRunning = (o: OwnerLoad): boolean =>
+  o.processes - KEPT_ON_STOP.reduce((n, k) => n + (o.kinds[k]?.processes ?? 0), 0) > 0 || o.docker.containers.length > 0
+
 function emptyOwner(key: OwnerKey, name: string): OwnerLoad {
-  return { key, name, repo: null, branch: null, orca: false, gone: false, agentState: null, cpu: 0, memory: 0, processes: 0, kinds: {}, agents: {}, mcp: {}, top: [], docker: { cpu: 0, memory: 0, containers: [] } }
+  return { key, name, repo: null, branch: null, orca: false, gone: false, cpu: 0, memory: 0, processes: 0, kinds: {}, agents: {}, mcp: {}, docker: { cpu: 0, memory: 0, containers: [] } }
 }
 
 /** "~/.worktrees/repo-abc/agent-123" → name "agent-123", repo "repo-abc". */
@@ -271,9 +250,12 @@ function describePath(path: string): { name: string; repo: string | null } {
   return { name: parts.at(-1) ?? path, repo: parts.at(-2) ?? null }
 }
 
+const BUCKET_NAMES: Record<string, string> = { [ORCA_APP]: 'Orca', [DOCKER_VM]: 'Docker', [OTHER]: 'Everything else' }
+
 export function rollUp(input: {
   procs: readonly Proc[]
   owners: ReadonlyMap<number, OwnerKey>
+  /** Per PID: CPU in % of one core, footprint in bytes (RSS when missing). */
   cpu: ReadonlyMap<number, number>
   memory: ReadonlyMap<number, number>
   orcaWorktrees: readonly OrcaWorktree[]
@@ -287,14 +269,11 @@ export function rollUp(input: {
   const get = (key: OwnerKey): OwnerLoad => {
     let o = table.get(key)
     if (!o) {
-      if (key === ORCA_APP) o = emptyOwner(key, 'Orca')
-      else if (key === DOCKER_VM) o = emptyOwner(key, 'Docker Desktop (VM)')
-      else if (key === OTHER) o = emptyOwner(key, 'Everything else')
-      else {
-        const w = orcaByPath.get(key)
-        const d = describePath(key)
-        o = { ...emptyOwner(key, w?.name ?? d.name), repo: w?.project ?? d.repo, branch: w?.branch ?? null, orca: !!w, agentState: w?.state ?? null }
-      }
+      const w = orcaByPath.get(key)
+      const d = describePath(key)
+      o = BUCKET_NAMES[key]
+        ? emptyOwner(key, BUCKET_NAMES[key])
+        : { ...emptyOwner(key, w?.name ?? d.name), repo: w?.project ?? d.repo, branch: w?.branch ?? null, orca: !!w }
       table.set(key, o)
     }
     return o
@@ -309,7 +288,9 @@ export function rollUp(input: {
     const memory = input.memory.get(p.pid) ?? p.rss
     const kind = kindOf.get(p.pid)!
     const parent = byPid.get(p.ppid)
-    const root = !parent || kindOf.get(parent.pid) !== kind || (input.owners.get(parent.pid) ?? OTHER) !== ownerKey
+    // A new "thing" starts where the kind or the owner changes: the 5 processes of one MCP server
+    // count as one server.
+    const first = !parent || kindOf.get(parent.pid) !== kind || (input.owners.get(parent.pid) ?? OTHER) !== ownerKey
     o.cpu += cpu
     o.memory += memory
     o.processes++
@@ -317,143 +298,53 @@ export function rollUp(input: {
     k.cpu += cpu
     k.memory += memory
     k.processes++
-    if (root) k.count++
-    o.top.push({ pid: p.pid, name: shortName(p.command), kind, cpu, memory })
-    if (root && kind === 'agent') {
-      const tool = agentTool(p.command)
-      o.agents[tool] = (o.agents[tool] ?? 0) + 1
-    }
-    if (root && kind === 'mcp') {
-      const name = mcpName(p.command)
-      o.mcp[name] = (o.mcp[name] ?? 0) + 1
-    }
+    if (!first) continue
+    k.count++
+    if (kind === 'agent') o.agents[agentTool(p.command)] = (o.agents[agentTool(p.command)] ?? 0) + 1
+    if (kind === 'mcp') o.mcp[mcpName(p.command)] = (o.mcp[mcpName(p.command)] ?? 0) + 1
   }
 
-  // Containers live inside Docker's VM, which macOS sees as one process. Each worktree gets a share
-  // of the VM's footprint and CPU, in proportion to its containers' memory and CPU, and that share
-  // leaves the Docker VM row, so nothing is counted twice. The rest of the VM stays there.
+  // Containers run inside Docker's VM, which macOS sees as one process. A worktree gets what its
+  // containers use (docker stats), capped by their share of the VM; that part leaves the Docker row
+  // so nothing is counted twice. The VM's own overhead stays in the Docker row.
   const vm = input.procs.filter((p) => input.owners.get(p.pid) === DOCKER_VM && isDockerVmProcess(p.command))
   const vmMemory = vm.reduce((n, p) => n + (input.memory.get(p.pid) ?? p.rss), 0)
   const vmCpu = vm.reduce((n, p) => n + (input.cpu.get(p.pid) ?? 0), 0)
   const used = input.containers.reduce((n, c) => n + c.memory, 0)
   const busy = input.containers.reduce((n, c) => n + c.cpu, 0)
-  const memoryShare = (c: Container) => (vmMemory && used ? Math.min(vmMemory, (vmMemory * c.memory) / used) : c.memory)
-  const cpuShare = (c: Container) => (vmCpu && busy ? (vmCpu * c.cpu) / busy : c.cpu)
+  const counted = { cpu: 0, memory: 0 }
   for (const c of input.containers) {
-    if (!c.workingDir) continue
-    const root = input.resolver.rootFor(c.workingDir)
-    let o: OwnerLoad
-    if (root) o = get(root)
-    else {
-      // No worktree around the compose folder: group by project, and say if the folder is gone.
-      o = get(`docker:${c.project || c.workingDir}`)
+    const owner = containerOwner(c, input.resolver)
+    if (!owner) continue
+    const o = get(owner.key)
+    if (owner.key.startsWith('docker:')) {
       o.name = c.project || c.workingDir
       o.repo = null
-      o.gone = !input.resolver.exists(c.workingDir)
+      o.gone = owner.gone
     }
-    const share = { cpu: cpuShare(c), memory: memoryShare(c) }
-    o.docker.cpu += share.cpu
-    o.docker.memory += share.memory
+    const memory = vm.length && used ? Math.min(c.memory, (vmMemory * c.memory) / used) : c.memory
+    const cpu = vm.length && busy ? Math.min(c.cpu, (vmCpu * c.cpu) / busy) : c.cpu
+    o.docker.memory += memory
+    o.docker.cpu += cpu
     o.docker.containers.push({ name: c.name, cpu: c.cpu, memory: c.memory })
+    counted.memory += memory
+    counted.cpu += cpu
   }
-  if (vmMemory && used) {
+  if (vm.length) {
     const dockerVm = get(DOCKER_VM)
-    const attributed = [...table.values()].reduce((n, o) => n + o.docker.memory, 0)
-    const attributedCpu = [...table.values()].reduce((n, o) => n + o.docker.cpu, 0)
-    dockerVm.memory = Math.max(0, dockerVm.memory - attributed)
-    dockerVm.cpu = Math.max(0, dockerVm.cpu - attributedCpu)
+    dockerVm.memory = Math.max(0, dockerVm.memory - counted.memory)
+    dockerVm.cpu = Math.max(0, dockerVm.cpu - counted.cpu)
   }
 
   // Every Orca worktree shows up, even idle.
   for (const w of input.orcaWorktrees) get(w.path)
 
-  for (const o of table.values()) o.top = o.top.sort((a, b) => b.memory - a.memory).slice(0, 30)
-
-  const buckets = new Set([ORCA_APP, DOCKER_VM, OTHER])
   return {
     at: input.at,
     machine: input.machine,
-    worktrees: [...table.values()].filter((o) => !buckets.has(o.key)),
+    worktrees: [...table.values()].filter((o) => !BUCKET_NAMES[o.key]),
     orcaApp: get(ORCA_APP),
     dockerVm: get(DOCKER_VM),
-    other: get(OTHER),
+    other: get(OTHER)
   }
-}
-
-// ---------------------------------------------------------------------------------------------
-// History: one bucket per `bucketMs`, averaged, kept for `buckets` buckets.
-
-export type Point = { at: number; cpu: number; memory: number }
-export type History = Record<OwnerKey, Point[]>
-
-export function record(history: History, s: Snapshot, bucketMs: number, buckets: number): History {
-  const at = Math.floor(s.at / bucketMs) * bucketMs
-  const next: History = {}
-  const all = [...s.worktrees, s.orcaApp, s.dockerVm, s.other]
-  const total = { cpu: 0, memory: 0 }
-  for (const o of all) {
-    total.cpu += o.cpu
-    total.memory += o.memory
-  }
-  const rows: [OwnerKey, { cpu: number; memory: number }][] = [
-    ...s.worktrees.map((o): [OwnerKey, { cpu: number; memory: number }] => [o.key, { cpu: o.cpu + o.docker.cpu, memory: o.memory + o.docker.memory }]),
-    ['@total', total]
-  ]
-  for (const [key, v] of rows) {
-    const points = [...(history[key] ?? [])]
-    const last = points.at(-1)
-    if (last && last.at === at) {
-      // Running average inside the bucket, weighted by how many samples it holds.
-      const n = (last as Point & { n?: number }).n ?? 1
-      points[points.length - 1] = { at, cpu: (last.cpu * n + v.cpu) / (n + 1), memory: (last.memory * n + v.memory) / (n + 1), n: n + 1 } as Point
-    } else {
-      points.push({ at, cpu: v.cpu, memory: v.memory })
-    }
-    next[key] = points.filter((p) => p.at > at - bucketMs * buckets)
-  }
-  return next
-}
-
-// ---------------------------------------------------------------------------------------------
-// Formatting
-
-const BARS = '▁▂▃▄▅▆▇█'
-
-export function sparkline(values: readonly number[], max?: number): string {
-  if (values.length === 0) return ''
-  const top = max ?? Math.max(...values, 1)
-  return values.map((v) => BARS[Math.min(BARS.length - 1, Math.max(0, Math.round((v / top) * (BARS.length - 1))))]).join('')
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes >= 2 ** 30) return `${(bytes / 2 ** 30).toFixed(1)} GB`
-  if (bytes >= 2 ** 20) return `${Math.round(bytes / 2 ** 20)} MB`
-  if (bytes >= 2 ** 10) return `${Math.round(bytes / 2 ** 10)} KB`
-  return `${bytes} B`
-}
-
-/** CPU in % of the whole Mac: `cpu` is in % of one core, so 1800% on 18 cores is 100%. */
-export function formatCpu(cpu: number, cores: number): string {
-  const share = cpu / Math.max(1, cores)
-  return `${share < 10 ? share.toFixed(1) : Math.round(share)}%`
-}
-
-export const totalOf = (o: OwnerLoad) => ({ cpu: o.cpu + o.docker.cpu, memory: o.memory + o.docker.memory })
-
-export function statusBar(s: Snapshot): { text: string; tone: 'neutral' | 'warning' | 'danger'; tooltip: string } {
-  if (s.error && s.worktrees.length === 0) return { text: 'Worktrees: ?', tone: 'warning', tooltip: s.error }
-  const live = s.worktrees.filter((w) => w.processes > 0 || w.docker.containers.length > 0)
-  const memory = live.reduce((n, w) => n + totalOf(w).memory, 0)
-  const heaviest = [...live].sort((a, b) => totalOf(b).memory - totalOf(a).memory)[0]
-  const m = s.machine
-  // Orca shows the tooltip on one line: keep it short.
-  const tooltip = [
-    heaviest ? `Heaviest: ${heaviest.name} ${formatBytes(totalOf(heaviest).memory)}` : null,
-    m.memoryUsed ? `Mac: ${formatBytes(m.memoryUsed)} of ${formatBytes(m.memoryTotal)} used` : null,
-    'Click for details'
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  const tone = m.pressure === 'critical' ? 'danger' : m.pressure === 'warning' ? 'warning' : 'neutral'
-  return { text: `${formatBytes(memory)} in ${live.length} worktrees`, tone, tooltip }
 }
